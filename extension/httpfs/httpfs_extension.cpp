@@ -1,7 +1,9 @@
 #define DUCKDB_EXTENSION_MAIN
 
-#include "duckdb.hpp"
 #include "httpfs_extension.hpp"
+
+#include "cephfs.hpp"
+#include "duckdb.hpp"
 #include "s3fs.hpp"
 
 namespace duckdb {
@@ -11,6 +13,7 @@ static void LoadInternal(DatabaseInstance &instance) {
 	auto &fs = instance.GetFileSystem();
 
 	fs.RegisterSubSystem(make_uniq<HTTPFileSystem>());
+	fs.RegisterSubSystem(make_uniq<CephFileSystem>());
 	fs.RegisterSubSystem(make_uniq<S3FileSystem>(BufferManager::GetBufferManager(instance)));
 
 	auto &config = DBConfig::GetConfig(instance);

@@ -6,10 +6,10 @@ add_extension_definitions()
 
 include_directories(include ../../third_party/httplib ../parquet/include)
 
-build_static_extension(httpfs s3fs.cpp httpfs.cpp crypto.cpp
+build_static_extension(httpfs s3fs.cpp cephfs.cpp  ceph_connector.cpp httpfs.cpp crypto.cpp
                        httpfs_extension.cpp)
 set(PARAMETERS "-warnings")
-build_loadable_extension(httpfs ${PARAMETERS} s3fs.cpp httpfs.cpp crypto.cpp
+build_loadable_extension(httpfs ${PARAMETERS} s3fs.cpp cephfs.cpp  ceph_connector.cpp httpfs.cpp crypto.cpp
                          httpfs_extension.cpp)
 
 if(MINGW)
@@ -18,9 +18,14 @@ endif()
 
 find_package(OpenSSL REQUIRED)
 include_directories(${OPENSSL_INCLUDE_DIR})
+
+find_library(ceph-common NAMES libceph-common.so.2)
+find_library(rados NAMES librados.so.2)
+find_library(radosstriper NAMES libradosstriper.so.1)
+
 target_link_libraries(httpfs_loadable_extension duckdb_mbedtls
-                      ${OPENSSL_LIBRARIES})
-target_link_libraries(httpfs_extension duckdb_mbedtls ${OPENSSL_LIBRARIES})
+                      ${OPENSSL_LIBRARIES}  -lstdc++fs ${ceph-common} ${radosstriper} ${rados})
+target_link_libraries(httpfs_extension duckdb_mbedtls ${OPENSSL_LIBRARIES}  -lstdc++fs ${ceph-common} ${radosstriper} ${rados})
 
 if(MINGW)
   find_package(ZLIB)

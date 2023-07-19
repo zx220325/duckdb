@@ -6,12 +6,12 @@
 #include "duckdb/common/helper.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/windows.hpp"
+#include "duckdb/common/windows_util.hpp"
 #include "duckdb/function/scalar/string_functions.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/client_data.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/extension_helper.hpp"
-#include "duckdb/common/windows_util.hpp"
 
 #include <cstdint>
 #include <cstdio>
@@ -520,7 +520,7 @@ FileType FileHandle::GetType() {
 }
 
 bool FileSystem::IsRemoteFile(const string &path) {
-	const string prefixes[] = {"http://", "https://", "s3://"};
+	const string prefixes[] = {"http://", "https://", "s3://", "ceph://"};
 	for (auto &prefix : prefixes) {
 		if (StringUtil::StartsWith(path, prefix)) {
 			return true;
