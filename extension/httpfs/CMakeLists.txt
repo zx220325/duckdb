@@ -1,10 +1,14 @@
 cmake_minimum_required(VERSION 2.8.12)
 
 project(HTTPFsExtension)
+set(CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 17)
+set(CXX_STANDARD_REQUIRED 17)
 
 add_extension_definitions()
 
-include_directories(include ../../third_party/httplib ../parquet/include)
+
+include_directories(include ../../third_party/httplib ../../third_party/ceph_dep/include ../parquet/include )
 
 build_static_extension(httpfs s3fs.cpp cephfs.cpp  ceph_connector.cpp httpfs.cpp crypto.cpp
                        httpfs_extension.cpp)
@@ -19,13 +23,16 @@ endif()
 find_package(OpenSSL REQUIRED)
 include_directories(${OPENSSL_INCLUDE_DIR})
 
-find_library(ceph-common NAMES libceph-common.so.2)
-find_library(rados NAMES librados.so.2)
-find_library(radosstriper NAMES libradosstriper.so.1)
+# find_library(ceph-common NAMES libceph-common.so.2)
+find_library(rados NAMES rados)
+find_library(radosstriper NAMES radosstriper)
+# message(${ceph-common})
+message(${rados})
+message(${radosstriper})
 
 target_link_libraries(httpfs_loadable_extension duckdb_mbedtls
-                      ${OPENSSL_LIBRARIES}  -lstdc++fs ${ceph-common} ${radosstriper} ${rados})
-target_link_libraries(httpfs_extension duckdb_mbedtls ${OPENSSL_LIBRARIES}  -lstdc++fs ${ceph-common} ${radosstriper} ${rados})
+                      ${OPENSSL_LIBRARIES}  -lstdc++fs  ${radosstriper} ${rados})
+target_link_libraries(httpfs_extension duckdb_mbedtls ${OPENSSL_LIBRARIES}  -lstdc++fs  ${radosstriper} ${rados})
 
 if(MINGW)
   find_package(ZLIB)

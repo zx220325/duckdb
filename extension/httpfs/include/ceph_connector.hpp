@@ -4,6 +4,7 @@
 
 #include <cstdlib>
 #include <memory>
+#include <string>
 
 namespace duckdb {
 

@@ -3,6 +3,7 @@
 #include "radosstriper/libradosstriper.hpp"
 
 #include <cstring>
+#include <iostream>
 
 namespace duckdb {
 
@@ -43,36 +44,37 @@ void CephConnector::init() {
 	cluster = std::make_unique<librados::Rados>();
 	int ret = cluster->init2(username.c_str(), CLUSTER_NAME, 0);
 	if (ret < 0) {
-		throw std::runtime_error("Couldn't init cluster " + strerror(-ret));
+		throw std::runtime_error(std::string("Couldn't init cluster ") + strerror(-ret));
 	}
 	ret = cluster->conf_read_file(config_path.c_str());
 	if (ret < 0) {
-		throw std::runtime_error("Couldn't read conf file " + strerror(-ret));
+		throw std::runtime_error(std::string("Couldn't read conf file ") + strerror(-ret));
 	}
 	ret = cluster->connect();
 	if (ret < 0) {
-		throw std::runtime_error("Couldn't connect to cluster " + strerror(-ret));
+		throw std::runtime_error(std::string("Couldn't connect to cluster ") + strerror(-ret));
 	}
 }
 
 [[nodiscard]] int64_t CephConnector::Size(const std::string &path, const std::string &pool, const std::string &ns) {
-	auto combrs = getCombStriper(pool, ns);
+	auto combrs = this->getCombStriper(pool, ns);
 	CHECK_RETRUN(!combrs, -1);
 	uint64_t size = 0;
 	combrs->rs->stat2(path, &size, nullptr);
+	std::cout << path << " " << pool << " " << ns << " size: " << size << std::endl;
 	return size;
 }
 
 [[nodiscard]] bool CephConnector::Exist(const std::string &path, const std::string &pool, const std::string &ns) {
-	auto combrs = getCombStriper(pool, ns);
+	auto combrs = this->getCombStriper(pool, ns);
 	CHECK_RETRUN(!combrs, false);
 	ceph::bufferlist bufferlist;
 	auto ret = combrs->io_ctx->getxattr(path + ".0000000000000000", "striper.layout.object_size", bufferlist);
 	return ret >= 0;
 }
 
-[[nodiscard]] int64_t Read(const std::string &path, const std::string &pool, const std::string &ns, int64_t file_offset,
-                           char *buffer_out, int64_t buffer_out_len) {
+[[nodiscard]] int64_t CephConnector::Read(const std::string &path, const std::string &pool, const std::string &ns,
+                                          int64_t file_offset, char *buffer_out, int64_t buffer_out_len) {
 	auto combrs = getCombStriper(pool, ns);
 	CHECK_RETRUN(!combrs, -1);
 	int64_t has_read = 0;
@@ -85,6 +87,7 @@ void CephConnector::init() {
 			has_read += buf.length();
 		}
 	}
+	std::cout << path << " has read: " << has_read << std::endl;
 	return has_read;
 }
 

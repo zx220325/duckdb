@@ -64,6 +64,7 @@ void CephFileHandle::Initialize(FileOpener *opener) {
 void CephFileSystem::doReadFromCeph(FileHandle &handle, string url, idx_t file_offset, char *buffer_out,
                                     idx_t buffer_out_len) {
 	auto &&cs = CephConnector::connnector_singleton();
+	std::string pool, ns, path;
 	ParseUrl(url, pool, ns, path);
 	cs->Read(path, pool, ns, file_offset, buffer_out, buffer_out_len);
 }
