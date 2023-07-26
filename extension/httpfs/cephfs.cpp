@@ -66,7 +66,7 @@ void CephFileSystem::doReadFromCeph(FileHandle &handle, string url, idx_t file_o
 	auto &&cs = CephConnector::connnector_singleton();
 	std::string pool, ns, path;
 	ParseUrl(url, pool, ns, path);
-	cs->Read(path, pool, ns, file_offset, buffer_out, buffer_out_len);
+	auto ret = cs->Read(path, pool, ns, file_offset, buffer_out, buffer_out_len);
 }
 
 unique_ptr<CephFileHandle> CephFileSystem::CreateHandle(const string &path, uint8_t flags, FileLockType lock,
@@ -153,15 +153,39 @@ int64_t CephFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes)
 }
 
 void CephFileSystem::Write(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) {
-	throw NotImplementedException("Write for Ceph files not implemented");
+	throw NotImplementedException("Random write for ceph files not implemented");
 }
 
 int64_t CephFileSystem::Write(FileHandle &handle, void *buffer, int64_t nr_bytes) {
-	throw NotImplementedException("Write for Ceph files not implemented");
+	auto &hfh = (CephFileHandle &)handle;
+	// Write(handle, buffer, nr_bytes, hfh.file_offset);
+	if (!(hfh.flags & FileFlags::FILE_FLAGS_WRITE)) {
+		throw InternalException("Write called on file not opened in write mode");
+	}
+	if (hfh.file_offset != 0) {
+		throw InternalException("Currently only whole writes are supported");
+	}
+	idx_t location = 0;
+	int64_t bytes_written = 0;
+	auto &&cs = CephConnector::connnector_singleton();
+	while (bytes_written < nr_bytes) {
+		auto curr_location = location + bytes_written;
+
+		if (curr_location != hfh.file_offset) {
+			throw InternalException("Non-sequential write not supported!");
+		}
+
+		auto bytes_to_write = nr_bytes - bytes_written;
+		auto ret =
+		    cs->Write(hfh.obj_name, hfh.pool, hfh.ns, hfh.file_offset, (char *)buffer + bytes_written, bytes_to_write);
+		D_ASSERT(ret == bytes_to_write);
+		hfh.file_offset += bytes_to_write;
+		bytes_written += bytes_to_write;
+	}
+	return nr_bytes;
 }
 
 void CephFileSystem::FileSync(FileHandle &handle) {
-	throw NotImplementedException("FileSync for Ceph files not implemented");
 }
 
 int64_t CephFileSystem::GetFileSize(FileHandle &handle) {
@@ -180,8 +204,15 @@ bool CephFileSystem::FileExists(const string &filename) {
 	ParseUrl(filename, pool, ns, path);
 	return cs->Exist(path, pool, ns);
 }
+
+void CephFileSystem::RemoveFile(const string &filename) {
+	auto &&cs = CephConnector::connnector_singleton();
+	string path, pool, ns;
+	ParseUrl(filename, pool, ns, path);
+	D_ASSERT(cs->Delete(path, pool, ns));
+}
 void CephFileSystem::Seek(FileHandle &handle, idx_t location) {
-	auto &sfh = (HTTPFileHandle &)handle;
+	auto &sfh = (CephFileHandle &)handle;
 	sfh.file_offset = location;
 }
 

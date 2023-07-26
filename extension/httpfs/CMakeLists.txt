@@ -23,12 +23,8 @@ endif()
 find_package(OpenSSL REQUIRED)
 include_directories(${OPENSSL_INCLUDE_DIR})
 
-# find_library(ceph-common NAMES libceph-common.so.2)
 find_library(rados NAMES rados)
 find_library(radosstriper NAMES radosstriper)
-# message(${ceph-common})
-message(${rados})
-message(${radosstriper})
 
 target_link_libraries(httpfs_loadable_extension duckdb_mbedtls
                       ${OPENSSL_LIBRARIES}  -lstdc++fs  ${radosstriper} ${rados})

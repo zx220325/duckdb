@@ -14,7 +14,7 @@ public:
 	uint8_t flags;
 	idx_t length;
 	time_t last_modified;
-	bool range_read = true;
+	bool range_read = false;
 
 	// Read info
 	idx_t buffer_available;
@@ -25,7 +25,7 @@ public:
 
 	// Read buffer
 	duckdb::unique_ptr<data_t[]> read_buffer;
-	constexpr static idx_t READ_BUFFER_LEN = 1000000;
+	constexpr static idx_t READ_BUFFER_LEN = 4 << 20;
 
 	string obj_name, pool, ns;
 
@@ -54,6 +54,7 @@ public:
 	int64_t GetFileSize(FileHandle &handle) override;
 	time_t GetLastModifiedTime(FileHandle &handle) override;
 	bool FileExists(const string &filename) override;
+	void RemoveFile(const string &filename) override;
 	void Seek(FileHandle &handle, idx_t location) override;
 	bool CanHandleFile(const string &fpath) override;
 	bool CanSeek() override {

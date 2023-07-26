@@ -1,15 +1,16 @@
 #pragma once
 
+#include "LRUCache11.hpp"
 #include "radosstriper/libradosstriper.hpp"
 
+#include <array>
 #include <cstdlib>
 #include <memory>
+#include <mutex>
 #include <string>
 
 namespace duckdb {
-
 class CephConnector {
-
 public:
 	static std::shared_ptr<CephConnector> connnector_singleton() {
 		static std::shared_ptr<CephConnector> instance(new CephConnector);
@@ -28,12 +29,16 @@ public:
 	[[nodiscard]] int64_t Read(const std::string &path, const std::string &pool, const std::string &ns,
 	                           int64_t file_offset, char *buffer_out, int64_t buffer_out_len);
 
-	[[nodiscard]] int64_t Write(const std::string &buf, const std::string &path, const std::string &pool,
-	                            const std::string &ns);
+	[[nodiscard]] int64_t Write(const std::string &path, const std::string &pool, const std::string &ns,
+	                            int64_t file_offset, char *buffer_in, int64_t buffer_in_len);
 
 	[[nodiscard]] bool Delete(const std::string &path, const std::string &pool, const std::string &ns);
 
 private:
+	[[nodiscard]] size_t BKDRHash(const std::string &path, const std::string &pool, const std::string &ns);
+	[[nodiscard]] int64_t doRead(const std::string &path, const std::string &pool, const std::string &ns,
+	                             int64_t file_offset, char *buffer_out, int64_t buffer_out_len);
+
 	CephConnector() = default;
 	CephConnector(const CephConnector &) = delete;
 	CephConnector &operator=(const CephConnector &) = delete;
@@ -44,6 +49,7 @@ private:
 	};
 	std::shared_ptr<CombStriper> getCombStriper(const std::string &pool, const std::string &ns);
 	std::unique_ptr<librados::Rados> cluster;
+	lru11::Cache<size_t, int64_t, std::mutex> meta_cache {1024};
 	static pid_t pid_;
 };
 } // namespace duckdb

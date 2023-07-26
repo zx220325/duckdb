@@ -56,25 +56,51 @@ void CephConnector::init() {
 	}
 }
 
+[[nodiscard]] size_t CephConnector::BKDRHash(const std::string &path, const std::string &pool, const std::string &ns) {
+	size_t ret = 0;
+	auto hash = [&ret](const std::string &s) {
+		for (auto &ch : s) {
+			ret = ret * 131 + ch;
+		}
+	};
+	hash(path);
+	hash(pool);
+	hash(ns);
+	return ret;
+}
+
 [[nodiscard]] int64_t CephConnector::Size(const std::string &path, const std::string &pool, const std::string &ns) {
+	auto key = BKDRHash(path, pool, ns);
+	if (int64_t ret; meta_cache.tryGet(key, ret) && ret >= 0) {
+		return ret;
+	}
 	auto combrs = this->getCombStriper(pool, ns);
 	CHECK_RETRUN(!combrs, -1);
 	uint64_t size = 0;
 	combrs->rs->stat2(path, &size, nullptr);
-	std::cout << path << " " << pool << " " << ns << " size: " << size << std::endl;
+	meta_cache.insert(key, size);
 	return size;
 }
 
 [[nodiscard]] bool CephConnector::Exist(const std::string &path, const std::string &pool, const std::string &ns) {
+	auto key = BKDRHash(path, pool, ns);
+	// -1 indicate exist, but size is unkown
+	// 0 need to judge again
+	if (int64_t ret; meta_cache.tryGet(key, ret) && ret != 0) {
+		return true;
+	}
 	auto combrs = this->getCombStriper(pool, ns);
 	CHECK_RETRUN(!combrs, false);
 	ceph::bufferlist bufferlist;
 	auto ret = combrs->io_ctx->getxattr(path + ".0000000000000000", "striper.layout.object_size", bufferlist);
+	if (ret >= 0) {
+		meta_cache.insert(key, -1);
+	}
 	return ret >= 0;
 }
 
-[[nodiscard]] int64_t CephConnector::Read(const std::string &path, const std::string &pool, const std::string &ns,
-                                          int64_t file_offset, char *buffer_out, int64_t buffer_out_len) {
+[[nodiscard]] int64_t CephConnector::doRead(const std::string &path, const std::string &pool, const std::string &ns,
+                                            int64_t file_offset, char *buffer_out, int64_t buffer_out_len) {
 	auto combrs = getCombStriper(pool, ns);
 	CHECK_RETRUN(!combrs, -1);
 	int64_t has_read = 0;
@@ -87,22 +113,27 @@ void CephConnector::init() {
 			has_read += buf.length();
 		}
 	}
-	std::cout << path << " has read: " << has_read << std::endl;
 	return has_read;
 }
 
-[[nodiscard]] int64_t CephConnector::Write(const std::string &buf, const std::string &path, const std::string &pool,
-                                           const std::string &ns) {
+[[nodiscard]] int64_t CephConnector::Read(const std::string &path, const std::string &pool, const std::string &ns,
+                                          int64_t file_offset, char *buffer_out, int64_t buffer_out_len) {
+	return doRead(path, pool, ns, file_offset, buffer_out, buffer_out_len);
+}
+
+[[nodiscard]] int64_t CephConnector::Write(const std::string &path, const std::string &pool, const std::string &ns,
+                                           int64_t file_offset, char *buffer_in, int64_t buffer_in_len) {
 	CHECK_RETRUN(Exist(path, pool, ns) && !Delete(path, pool, ns), -1);
 	auto combrs = getCombStriper(pool, ns);
 	CHECK_RETRUN(!combrs, -1);
 	std::vector<std::unique_ptr<librados::AioCompletion>> completions;
-	for (size_t transmited = 0; transmited < buf.size(); transmited += SPLIT_SIZE) // create write ops
+	size_t transmited = 0;
+	for (; transmited < buffer_in_len; transmited += SPLIT_SIZE) // create write ops
 	{
-		const auto transfer_size = std::min(SPLIT_SIZE, buf.size() - transmited);
-		auto bl = ceph::bufferlist::static_from_mem(const_cast<char *>(buf.c_str()) + transmited, transfer_size);
+		const auto transfer_size = std::min(SPLIT_SIZE, buffer_in_len - transmited);
+		auto bl = ceph::bufferlist::static_from_mem(const_cast<char *>(buffer_in) + transmited, transfer_size);
 		completions.emplace_back(librados::Rados::aio_create_completion());
-		auto ret = combrs->rs->aio_write(path, completions.back().get(), bl, transfer_size, transmited);
+		auto ret = combrs->rs->aio_write(path, completions.back().get(), bl, transfer_size, transmited + file_offset);
 		CHECK_RETRUN(ret < 0, ret);
 	}
 	// wait for all job complete
@@ -123,15 +154,16 @@ void CephConnector::init() {
 		int ret = combrs->rs->setxattr(path, "_version", bl);
 		CHECK_RETRUN(ret != 0, ret);
 		bl.clear();
-		bl.append(std::to_string(buf.size()));
+		bl.append(std::to_string(buffer_in_len));
 		ret = combrs->rs->setxattr(path, "_size", bl);
 		CHECK_RETRUN(ret != 0, ret);
 	}
 
-	return buf.size();
+	return transmited;
 }
 
 [[nodiscard]] bool CephConnector::Delete(const std::string &path, const std::string &pool, const std::string &ns) {
+	meta_cache.remove(BKDRHash(path, pool, ns));
 	auto combrs = getCombStriper(pool, ns);
 	CHECK_RETRUN(!combrs, false);
 	combrs->rs->rmxattr(path, "_version");
