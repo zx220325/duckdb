@@ -14,7 +14,7 @@ namespace duckdb {
 		}                                                                                                              \
 	} while (0)
 
-static constexpr size_t SPLIT_SIZE = 1024 * 1024 * 1024;
+static constexpr int64_t SPLIT_SIZE = 1024 * 1024 * 1024;
 static std::string getEnv(const std::string &ENV) {
 	auto ptr = std::getenv(ENV.c_str());
 	std::string ret;
@@ -104,7 +104,7 @@ void CephConnector::init() {
 	auto combrs = getCombStriper(pool, ns);
 	CHECK_RETRUN(!combrs, -1);
 	int64_t has_read = 0;
-	for (uint64_t offset = 0; offset < buffer_out_len; offset += SPLIT_SIZE) {
+	for (int64_t offset = 0; offset < buffer_out_len; offset += SPLIT_SIZE) {
 		ceph::bufferlist bl;
 		auto ret = combrs->rs->read(path, &bl, std::min(SPLIT_SIZE, buffer_out_len - offset), offset + file_offset);
 		CHECK_RETRUN(ret <= 0, -1);
@@ -127,7 +127,7 @@ void CephConnector::init() {
 	auto combrs = getCombStriper(pool, ns);
 	CHECK_RETRUN(!combrs, -1);
 	std::vector<std::unique_ptr<librados::AioCompletion>> completions;
-	size_t transmited = 0;
+	int64_t transmited = 0;
 	for (; transmited < buffer_in_len; transmited += SPLIT_SIZE) // create write ops
 	{
 		const auto transfer_size = std::min(SPLIT_SIZE, buffer_in_len - transmited);

@@ -8,7 +8,7 @@ set(CXX_STANDARD_REQUIRED 17)
 add_extension_definitions()
 
 
-include_directories(include ../../third_party/httplib ../../third_party/ceph_dep/include ../parquet/include )
+include_directories(include ../../third_party/httplib ../parquet/include )
 
 build_static_extension(httpfs s3fs.cpp cephfs.cpp  ceph_connector.cpp httpfs.cpp crypto.cpp
                        httpfs_extension.cpp)

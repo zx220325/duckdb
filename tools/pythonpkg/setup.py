@@ -63,7 +63,11 @@ extensions = ['parquet', 'icu', 'fts', 'tpch', 'tpcds', 'json']
 if platform.system() == 'Windows':
     extensions = ['parquet', 'icu', 'fts', 'tpch', 'json']
 
-if platform.system() == 'Linux' and platform.architecture()[0] == '64bit' and not hasattr(sys, 'getandroidapilevel'):
+if (
+    platform.system() == 'Linux'
+    and platform.architecture()[0] == '64bit'
+    and not hasattr(sys, 'getandroidapilevel')
+):
     extensions.append('jemalloc')
 
 unity_build = 0
@@ -96,7 +100,11 @@ def parallel_cpp_compile(
             return
         self._compile(obj, src, ext, cc_args, extra_postargs, pp_opts)
 
-    list(multiprocessing.pool.ThreadPool(multiprocessing.cpu_count()).imap(_single_compile, objects))
+    list(
+        multiprocessing.pool.ThreadPool(multiprocessing.cpu_count()).imap(
+            _single_compile, objects
+        )
+    )
     return objects
 
 
@@ -121,12 +129,20 @@ os.chdir(os.path.dirname(os.path.realpath(__file__)))
 
 if os.name == 'nt':
     # windows:
-    toolchain_args = ['/wd4244', '/wd4267', '/wd4200', '/wd26451', '/wd26495', '/D_CRT_SECURE_NO_WARNINGS', '/utf-8']
+    toolchain_args = [
+        '/wd4244',
+        '/wd4267',
+        '/wd4200',
+        '/wd26451',
+        '/wd26495',
+        '/D_CRT_SECURE_NO_WARNINGS',
+        '/utf-8',
+    ]
 else:
     # macos/linux
-    toolchain_args = ['-std=c++11', '-g0']
+    toolchain_args = ['-std=c++17', '-g0']
     if 'DUCKDEBUG' in os.environ:
-        toolchain_args = ['-std=c++11', '-Wall', '-O0', '-g']
+        toolchain_args = ['-std=c++17', '-Wall', '-O0', '-g']
 if 'DUCKDB_INSTALL_USER' in os.environ and 'install' in sys.argv:
     sys.argv.append('--user')
 
@@ -139,11 +155,17 @@ for i in range(len(sys.argv)):
     elif sys.argv[i].startswith('--package_name='):
         lib_name = sys.argv[i].split('=', 1)[1]
     elif sys.argv[i].startswith("--compile-flags="):
-        toolchain_args = ['-std=c++11'] + [
-            x.strip() for x in sys.argv[i].split('=', 1)[1].split(' ') if len(x.strip()) > 0
+        toolchain_args = ['-std=c++17'] + [
+            x.strip()
+            for x in sys.argv[i].split('=', 1)[1].split(' ')
+            if len(x.strip()) > 0
         ]
     elif sys.argv[i].startswith("--libs="):
-        libraries = [x.strip() for x in sys.argv[i].split('=', 1)[1].split(' ') if len(x.strip()) > 0]
+        libraries = [
+            x.strip()
+            for x in sys.argv[i].split('=', 1)[1].split(' ')
+            if len(x.strip()) > 0
+        ]
     else:
         new_sys_args.append(sys.argv[i])
 sys.argv = new_sys_args
@@ -156,7 +178,7 @@ if platform.system() == 'Windows':
     toolchain_args.extend(['-DDUCKDB_BUILD_LIBRARY', '-DWIN32'])
 
 if 'BUILD_HTTPFS' in os.environ:
-    libraries += ['crypto', 'ssl']
+    libraries += ['crypto', 'ssl', 'radosstriper', 'rados']
     extensions += ['httpfs']
 
 for ext in extensions:
@@ -186,14 +208,20 @@ script_path = os.path.dirname(os.path.abspath(__file__))
 main_include_path = os.path.join(script_path, 'src', 'include')
 main_source_path = os.path.join(script_path, 'src')
 main_source_files = ['duckdb_python.cpp'] + list_source_files(main_source_path)
-include_directories = [main_include_path, get_pybind_include(), get_pybind_include(user=True)]
+include_directories = [
+    main_include_path,
+    get_pybind_include(),
+    get_pybind_include(user=True),
+]
 
 if len(existing_duckdb_dir) == 0:
     # no existing library supplied: compile everything from source
     source_files = main_source_files
 
     # check if amalgamation exists
-    if os.path.isfile(os.path.join(script_path, '..', '..', 'scripts', 'amalgamation.py')):
+    if os.path.isfile(
+        os.path.join(script_path, '..', '..', 'scripts', 'amalgamation.py')
+    ):
         # amalgamation exists: compiling from source directory
         # copy all source files to the current directory
         sys.path.append(os.path.join(script_path, '..', '..', 'scripts'))
@@ -204,7 +232,8 @@ if len(existing_duckdb_dir) == 0:
         )
 
         duckdb_sources = [
-            os.path.sep.join(package_build.get_relative_path(script_path, x).split('/')) for x in source_list
+            os.path.sep.join(package_build.get_relative_path(script_path, x).split('/'))
+            for x in source_list
         ]
         duckdb_sources.sort()
 
@@ -257,10 +286,15 @@ else:
     sys.path.append(os.path.join(script_path, '..', '..', 'scripts'))
     import package_build
 
-    include_directories += [os.path.join('..', '..', include) for include in package_build.third_party_includes()]
+    include_directories += [
+        os.path.join('..', '..', include)
+        for include in package_build.third_party_includes()
+    ]
     toolchain_args += ['-I' + x for x in package_build.includes(extensions)]
 
-    result_libraries = package_build.get_libraries(existing_duckdb_dir, libraries, extensions)
+    result_libraries = package_build.get_libraries(
+        existing_duckdb_dir, libraries, extensions
+    )
     library_dirs = [x[0] for x in result_libraries if x[0] is not None]
     libnames = [x[1] for x in result_libraries if x[1] is not None]
 
