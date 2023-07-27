@@ -36,8 +36,8 @@ public:
 
 private:
 	[[nodiscard]] size_t BKDRHash(const std::string &path, const std::string &pool, const std::string &ns);
-	[[nodiscard]] int64_t doRead(const std::string &path, const std::string &pool, const std::string &ns,
-	                             int64_t file_offset, char *buffer_out, int64_t buffer_out_len);
+	int64_t doRead(const std::string &path, const std::string &pool, const std::string &ns, int64_t file_offset,
+	               char *buffer_out, int64_t buffer_out_len);
 
 	CephConnector() = default;
 	CephConnector(const CephConnector &) = delete;
@@ -50,6 +50,7 @@ private:
 	std::shared_ptr<CombStriper> getCombStriper(const std::string &pool, const std::string &ns);
 	std::unique_ptr<librados::Rados> cluster;
 	lru11::Cache<size_t, int64_t, std::mutex> meta_cache {1024};
+	lru11::Cache<size_t, std::shared_ptr<std::vector<char>>, std::mutex> small_files_cache {128};
 	static pid_t pid_;
 };
 } // namespace duckdb

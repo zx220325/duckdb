@@ -15,6 +15,8 @@ namespace duckdb {
 	} while (0)
 
 static constexpr int64_t SPLIT_SIZE = 1024 * 1024 * 1024;
+static constexpr int64_t SMALL_FILE_THRESHOLD = 4 << 20;
+
 static std::string getEnv(const std::string &ENV) {
 	auto ptr = std::getenv(ENV.c_str());
 	std::string ret;
@@ -99,8 +101,8 @@ void CephConnector::init() {
 	return ret >= 0;
 }
 
-[[nodiscard]] int64_t CephConnector::doRead(const std::string &path, const std::string &pool, const std::string &ns,
-                                            int64_t file_offset, char *buffer_out, int64_t buffer_out_len) {
+int64_t CephConnector::doRead(const std::string &path, const std::string &pool, const std::string &ns,
+                              int64_t file_offset, char *buffer_out, int64_t buffer_out_len) {
 	auto combrs = getCombStriper(pool, ns);
 	CHECK_RETRUN(!combrs, -1);
 	int64_t has_read = 0;
@@ -118,6 +120,23 @@ void CephConnector::init() {
 
 [[nodiscard]] int64_t CephConnector::Read(const std::string &path, const std::string &pool, const std::string &ns,
                                           int64_t file_offset, char *buffer_out, int64_t buffer_out_len) {
+	auto key = BKDRHash(path, pool, ns);
+	// if hit cache, then read from cache.
+	if (std::shared_ptr<std::vector<char>> buf; small_files_cache.tryGet(key, buf)) {
+		memcpy(buffer_out, buf->data() + file_offset, buffer_out_len);
+		return buffer_out_len;
+	}
+
+	// cache small files, usually they are some meta files
+	auto sz = Size(path, pool, ns);
+	if (sz < SMALL_FILE_THRESHOLD) {
+		auto buf = std::make_shared<std::vector<char>>(sz);
+		doRead(path, pool, ns, 0, buf->data(), sz);
+		memcpy(buffer_out, buf->data() + file_offset, buffer_out_len);
+		small_files_cache.insert(key, buf);
+		return buffer_out_len;
+	}
+	// read directly
 	return doRead(path, pool, ns, file_offset, buffer_out, buffer_out_len);
 }
 
