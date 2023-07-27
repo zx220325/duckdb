@@ -15,7 +15,6 @@ namespace duckdb {
 	} while (0)
 
 static constexpr int64_t SPLIT_SIZE = 1024 * 1024 * 1024;
-static constexpr int64_t SMALL_FILE_THRESHOLD = 4 << 20;
 
 static std::string getEnv(const std::string &ENV) {
 	auto ptr = std::getenv(ENV.c_str());
@@ -129,7 +128,7 @@ int64_t CephConnector::doRead(const std::string &path, const std::string &pool, 
 
 	// cache small files, usually they are some meta files
 	auto sz = Size(path, pool, ns);
-	if (sz < SMALL_FILE_THRESHOLD) {
+	if (sz <= SMALL_FILE_THRESHOLD) {
 		auto buf = std::make_shared<std::vector<char>>(sz);
 		doRead(path, pool, ns, 0, buf->data(), sz);
 		memcpy(buffer_out, buf->data() + file_offset, buffer_out_len);

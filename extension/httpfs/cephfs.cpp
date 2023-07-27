@@ -53,12 +53,13 @@ CephFileHandle::CephFileHandle(FileSystem &fs, string path, uint8_t flags)
 // This two-phase construction allows subclasses more flexible setup.
 void CephFileHandle::Initialize(FileOpener *opener) {
 	// Initialize the read buffer now that we know the file exists
-	if (flags & FileFlags::FILE_FLAGS_READ) {
-		read_buffer = duckdb::unique_ptr<data_t[]>(new data_t[READ_BUFFER_LEN]);
-	}
 	ParseUrl(path, pool, ns, obj_name);
 	auto &&cs = CephConnector::connnector_singleton();
 	length = cs->Size(obj_name, pool, ns);
+	// as we cache small files in ceph connector
+	if ((flags & FileFlags::FILE_FLAGS_READ) && length > CephConnector::SMALL_FILE_THRESHOLD) {
+		read_buffer = duckdb::unique_ptr<data_t[]>(new data_t[READ_BUFFER_LEN]);
+	}
 }
 
 void CephFileSystem::doReadFromCeph(FileHandle &handle, string url, idx_t file_offset, char *buffer_out,
@@ -91,13 +92,14 @@ void CephFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, id
 	idx_t buffer_offset = 0;
 
 	// Don't buffer when DirectIO is set.
-	if (hfh.flags & FileFlags::FILE_FLAGS_DIRECT_IO && to_read > 0) {
-		doReadFromCeph(hfh, hfh.path, location, (char *)buffer, to_read);
-		hfh.buffer_available = 0;
-		hfh.buffer_idx = 0;
-		hfh.file_offset = location + nr_bytes;
-		return;
-	}
+	// We disable this in Ceph
+	// if (hfh.flags & FileFlags::FILE_FLAGS_DIRECT_IO && to_read > 0) {
+	// 	doReadFromCeph(hfh, hfh.path, location, (char *)buffer, to_read);
+	// 	hfh.buffer_available = 0;
+	// 	hfh.buffer_idx = 0;
+	// 	hfh.file_offset = location + nr_bytes;
+	// 	return;
+	// }
 
 	if (location >= hfh.buffer_start && location < hfh.buffer_end) {
 		hfh.file_offset = location;
@@ -124,7 +126,10 @@ void CephFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, id
 		}
 
 		if (to_read > 0 && hfh.buffer_available == 0) {
-			auto new_buffer_available = MinValue<idx_t>(hfh.READ_BUFFER_LEN, hfh.length - hfh.file_offset);
+			idx_t new_buffer_available = 0;
+			if (hfh.read_buffer) {
+				new_buffer_available = MinValue<idx_t>(hfh.READ_BUFFER_LEN, hfh.length - hfh.file_offset);
+			}
 
 			// Bypass buffer if we read more than buffer size
 			if (to_read > new_buffer_available) {
