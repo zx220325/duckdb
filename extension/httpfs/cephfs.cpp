@@ -8,7 +8,7 @@
 #include "duckdb/function/scalar/strftime_format.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/database.hpp"
-#include "httpfs.hpp"
+// #include "httpfs.hpp"
 
 #include <chrono>
 #include <fstream>
@@ -92,14 +92,13 @@ void CephFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, id
 	idx_t buffer_offset = 0;
 
 	// Don't buffer when DirectIO is set.
-	// We disable this in Ceph
-	// if (hfh.flags & FileFlags::FILE_FLAGS_DIRECT_IO && to_read > 0) {
-	// 	doReadFromCeph(hfh, hfh.path, location, (char *)buffer, to_read);
-	// 	hfh.buffer_available = 0;
-	// 	hfh.buffer_idx = 0;
-	// 	hfh.file_offset = location + nr_bytes;
-	// 	return;
-	// }
+	if (hfh.flags & FileFlags::FILE_FLAGS_DIRECT_IO && to_read > 0) {
+		doReadFromCeph(hfh, hfh.path, location, (char *)buffer, to_read);
+		hfh.buffer_available = 0;
+		hfh.buffer_idx = 0;
+		hfh.file_offset = location + nr_bytes;
+		return;
+	}
 
 	if (location >= hfh.buffer_start && location < hfh.buffer_end) {
 		hfh.file_offset = location;

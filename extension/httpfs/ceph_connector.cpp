@@ -72,7 +72,8 @@ void CephConnector::init() {
 
 [[nodiscard]] int64_t CephConnector::Size(const std::string &path, const std::string &pool, const std::string &ns) {
 	auto key = BKDRHash(path, pool, ns);
-	if (int64_t ret; meta_cache.tryGet(key, ret) && ret >= 0) {
+	// -1 not exist or >= 0 return directly
+	if (int64_t ret; meta_cache.tryGet(key, ret) && ret >= -1) {
 		return ret;
 	}
 	auto combrs = this->getCombStriper(pool, ns);
@@ -85,9 +86,10 @@ void CephConnector::init() {
 
 [[nodiscard]] bool CephConnector::Exist(const std::string &path, const std::string &pool, const std::string &ns) {
 	auto key = BKDRHash(path, pool, ns);
-	// -1 indicate exist, but size is unkown
-	// 0 need to judge again
-	if (int64_t ret; meta_cache.tryGet(key, ret) && ret != 0) {
+	// -1 indicate not exist
+	// -4396 indicate exist, but size is unkown
+	static constexpr int64_t EXIST_FLAG = -4396;
+	if (int64_t ret; meta_cache.tryGet(key, ret) && ret != -1) {
 		return true;
 	}
 	auto combrs = this->getCombStriper(pool, ns);
@@ -95,6 +97,8 @@ void CephConnector::init() {
 	ceph::bufferlist bufferlist;
 	auto ret = combrs->io_ctx->getxattr(path + ".0000000000000000", "striper.layout.object_size", bufferlist);
 	if (ret >= 0) {
+		meta_cache.insert(key, EXIST_FLAG);
+	} else {
 		meta_cache.insert(key, -1);
 	}
 	return ret >= 0;
@@ -181,7 +185,10 @@ int64_t CephConnector::doRead(const std::string &path, const std::string &pool, 
 }
 
 [[nodiscard]] bool CephConnector::Delete(const std::string &path, const std::string &pool, const std::string &ns) {
-	meta_cache.remove(BKDRHash(path, pool, ns));
+	auto key = BKDRHash(path, pool, ns);
+	// remove from cache first.
+	meta_cache.remove(key);
+	small_files_cache.remove(key);
 	auto combrs = getCombStriper(pool, ns);
 	CHECK_RETRUN(!combrs, false);
 	combrs->rs->rmxattr(path, "_version");

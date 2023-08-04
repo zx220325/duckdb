@@ -9,6 +9,7 @@ add_extension_definitions()
 
 
 include_directories(include ../../third_party/httplib ../parquet/include )
+include_directories(../../third_party/openssl/include)
 
 build_static_extension(httpfs s3fs.cpp cephfs.cpp  ceph_connector.cpp httpfs.cpp crypto.cpp
                        httpfs_extension.cpp)
@@ -16,19 +17,26 @@ set(PARAMETERS "-warnings")
 build_loadable_extension(httpfs ${PARAMETERS} s3fs.cpp cephfs.cpp  ceph_connector.cpp httpfs.cpp crypto.cpp
                          httpfs_extension.cpp)
 
-if(MINGW)
-  set(OPENSSL_USE_STATIC_LIBS TRUE)
-endif()
+# if(MINGW)
+#   set(OPENSSL_USE_STATIC_LIBS TRUE)
+# endif()
 
-find_package(OpenSSL REQUIRED)
-include_directories(${OPENSSL_INCLUDE_DIR})
+# find_package(OpenSSL REQUIRED)
+# include_directories(${OPENSSL_INCLUDE_DIR})
+find_library(ssl NAMES ssl)
+find_library(crypto NAMES crypto)
+# find_library(ssl NAMES ssl PATHS ../../third_party/openssl/lib NO_DEFAULT_PATH)
+# find_library(crypto NAMES crypto PATHS ../../third_party/openssl/lib NO_DEFAULT_PATH)
+
+# message(STATUS ${ssl})
+# message(STATUS ${crypto})
 
 find_library(rados NAMES rados)
 find_library(radosstriper NAMES radosstriper)
 
 target_link_libraries(httpfs_loadable_extension duckdb_mbedtls
-                      ${OPENSSL_LIBRARIES}  -lstdc++fs  ${radosstriper} ${rados})
-target_link_libraries(httpfs_extension duckdb_mbedtls ${OPENSSL_LIBRARIES}  -lstdc++fs  ${radosstriper} ${rados})
+                     ${ssl}  ${crypto}  -lstdc++fs  ${radosstriper} ${rados})
+target_link_libraries(httpfs_extension duckdb_mbedtls ${ssl} ${crypto} -lstdc++fs  ${radosstriper} ${rados})
 
 if(MINGW)
   find_package(ZLIB)
