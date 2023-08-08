@@ -28,8 +28,8 @@ find_library(crypto NAMES crypto)
 # find_library(ssl NAMES ssl PATHS ../../third_party/openssl/lib NO_DEFAULT_PATH)
 # find_library(crypto NAMES crypto PATHS ../../third_party/openssl/lib NO_DEFAULT_PATH)
 
-# message(STATUS ${ssl})
-# message(STATUS ${crypto})
+message(STATUS ${ssl})
+message(STATUS ${crypto})
 
 find_library(rados NAMES rados)
 find_library(radosstriper NAMES radosstriper)

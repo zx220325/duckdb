@@ -213,7 +213,8 @@ void CephFileSystem::RemoveFile(const string &filename) {
 	auto &&cs = CephConnector::connnector_singleton();
 	string path, pool, ns;
 	ParseUrl(filename, pool, ns, path);
-	D_ASSERT(cs->Delete(path, pool, ns));
+	auto ret = cs->Delete(path, pool, ns);
+	D_ASSERT(ret);
 }
 void CephFileSystem::Seek(FileHandle &handle, idx_t location) {
 	auto &sfh = (CephFileHandle &)handle;

@@ -163,6 +163,14 @@ void AWSEnvironmentCredentialsProvider::SetAll() {
 	this->SetExtensionOptionValue("s3_use_ssl", this->DUCKDB_USE_SSL_ENV_VAR);
 }
 
+static string get_env_var(const char *env_var_name) {
+	auto evar = std::getenv(env_var_name);
+	if (evar != NULL) {
+		return string(evar);
+	}
+	return "";
+}
+
 S3AuthParams S3AuthParams::ReadFrom(FileOpener *opener) {
 	string region;
 	string access_key_id;
@@ -173,6 +181,13 @@ S3AuthParams S3AuthParams::ReadFrom(FileOpener *opener) {
 	bool s3_url_compatibility_mode;
 	bool use_ssl;
 	Value value;
+	if (opener == nullptr) {
+		region = get_env_var(AWSEnvironmentCredentialsProvider::REGION_ENV_VAR);
+		access_key_id = get_env_var(AWSEnvironmentCredentialsProvider::ACCESS_KEY_ENV_VAR);
+		secret_access_key = get_env_var(AWSEnvironmentCredentialsProvider::SECRET_KEY_ENV_VAR);
+		session_token = get_env_var(AWSEnvironmentCredentialsProvider::SESSION_TOKEN_ENV_VAR);
+		endpoint = get_env_var(AWSEnvironmentCredentialsProvider::DUCKDB_ENDPOINT_ENV_VAR);
+	}
 
 	if (FileOpener::TryGetCurrentSetting(opener, "s3_region", value)) {
 		region = value.ToString();
@@ -883,9 +898,9 @@ static bool Match(vector<string>::const_iterator key, vector<string>::const_iter
 }
 
 vector<string> S3FileSystem::Glob(const string &glob_pattern, FileOpener *opener) {
-	if (opener == nullptr) {
-		throw InternalException("Cannot S3 Glob without FileOpener");
-	}
+	// if (opener == nullptr) {
+	// 	throw InternalException("Cannot S3 Glob without FileOpener");
+	// }
 
 	// Trim any query parameters from the string
 	auto s3_auth_params = S3AuthParams::ReadFrom(opener);
