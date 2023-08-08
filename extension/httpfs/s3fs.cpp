@@ -179,7 +179,7 @@ S3AuthParams S3AuthParams::ReadFrom(FileOpener *opener) {
 	string endpoint;
 	string url_style;
 	bool s3_url_compatibility_mode;
-	bool use_ssl;
+	bool use_ssl = true;
 	Value value;
 	if (opener == nullptr) {
 		region = get_env_var(AWSEnvironmentCredentialsProvider::REGION_ENV_VAR);
@@ -187,6 +187,9 @@ S3AuthParams S3AuthParams::ReadFrom(FileOpener *opener) {
 		secret_access_key = get_env_var(AWSEnvironmentCredentialsProvider::SECRET_KEY_ENV_VAR);
 		session_token = get_env_var(AWSEnvironmentCredentialsProvider::SESSION_TOKEN_ENV_VAR);
 		endpoint = get_env_var(AWSEnvironmentCredentialsProvider::DUCKDB_ENDPOINT_ENV_VAR);
+		if (StringUtil::Lower(get_env_var(AWSEnvironmentCredentialsProvider::DUCKDB_USE_SSL_ENV_VAR)) == "false") {
+			use_ssl = false;
+		}
 	}
 
 	if (FileOpener::TryGetCurrentSetting(opener, "s3_region", value)) {
@@ -225,13 +228,13 @@ S3AuthParams S3AuthParams::ReadFrom(FileOpener *opener) {
 	if (FileOpener::TryGetCurrentSetting(opener, "s3_use_ssl", value)) {
 		use_ssl = value.GetValue<bool>();
 	} else {
-		use_ssl = true;
+		// use_ssl = true;
 	}
 
 	if (FileOpener::TryGetCurrentSetting(opener, "s3_url_compatibility_mode", value)) {
 		s3_url_compatibility_mode = value.GetValue<bool>();
 	} else {
-		s3_url_compatibility_mode = true;
+		s3_url_compatibility_mode = false;
 	}
 
 	return {region,   access_key_id, secret_access_key, session_token,
