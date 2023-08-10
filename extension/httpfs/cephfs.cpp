@@ -225,4 +225,18 @@ bool CephFileSystem::CanHandleFile(const string &fpath) {
 	auto ret = fpath.rfind("ceph://", 0) == 0;
 	return ret;
 }
+
+bool CephFileSystem::ListFiles(const string &directory, const std::function<void(const string &, bool)> &callback,
+                               FileOpener *opener) {
+	auto &&cs = CephConnector::connnector_singleton();
+	string path, pool, ns;
+	ParseUrl(directory, pool, ns, path);
+	auto objects = cs->ListNS(pool, ns);
+	for (auto &object : objects) {
+		if (object.rfind(path, 0) == 0) {
+			callback(object, true);
+		}
+	}
+	return true;
+}
 } // namespace duckdb

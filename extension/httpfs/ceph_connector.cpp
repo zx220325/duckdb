@@ -84,6 +84,8 @@ void CephConnector::init() {
 	return size;
 }
 
+static const std::string CEPH_OBJ_SUFFIX = ".0000000000000000";
+
 [[nodiscard]] bool CephConnector::Exist(const std::string &path, const std::string &pool, const std::string &ns) {
 	auto key = BKDRHash(path, pool, ns);
 	// -1 indicate not exist
@@ -95,7 +97,7 @@ void CephConnector::init() {
 	auto combrs = this->getCombStriper(pool, ns);
 	CHECK_RETRUN(!combrs, false);
 	ceph::bufferlist bufferlist;
-	auto ret = combrs->io_ctx->getxattr(path + ".0000000000000000", "striper.layout.object_size", bufferlist);
+	auto ret = combrs->io_ctx->getxattr(path + CEPH_OBJ_SUFFIX, "striper.layout.object_size", bufferlist);
 	if (ret >= 0) {
 		meta_cache.insert(key, EXIST_FLAG);
 	} else {
@@ -197,10 +199,33 @@ int64_t CephConnector::doRead(const std::string &path, const std::string &pool, 
 	if (ret != 0) {
 		// try force_delete
 		ret = combrs->io_ctx->remove(path);
-		ret = combrs->io_ctx->remove(path + ".0000000000000000") & ret;
+		ret = combrs->io_ctx->remove(path + CEPH_OBJ_SUFFIX) & ret;
 		CHECK_RETRUN(ret != 0, false);
 	}
 	return true;
+}
+
+[[nodiscard]] std::vector<std::string> CephConnector::ListNS(const std::string &pool, const std::string &ns) {
+	auto combrs = getCombStriper(pool, ns);
+	CHECK_RETRUN(!combrs, {});
+	ceph::bufferlist filter;
+	std::vector<librados::ObjectItem> obj_list;
+	decltype(combrs->io_ctx->object_list_end()) next;
+	auto obj_list_ret = combrs->io_ctx->object_list(combrs->io_ctx->object_list_begin(),
+	                                                combrs->io_ctx->object_list_end(), -1, filter, &obj_list, &next);
+	CHECK_RETRUN(obj_list_ret <= 0, {});
+	std::vector<std::string> ret;
+	ret.reserve(obj_list_ret);
+	for (auto &obj : obj_list) {
+		if (obj.nspace != ns) {
+			continue;
+		}
+		const auto pos = obj.oid.size() - CEPH_OBJ_SUFFIX.size();
+		if (obj.oid.find(CEPH_OBJ_SUFFIX, pos) != std::string::npos) {
+			ret.emplace_back(obj.oid.substr(0, pos));
+		}
+	}
+	return ret;
 }
 
 std::shared_ptr<CephConnector::CombStriper> CephConnector::getCombStriper(const std::string &pool,

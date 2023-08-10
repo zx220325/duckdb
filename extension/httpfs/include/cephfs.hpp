@@ -55,6 +55,8 @@ public:
 	time_t GetLastModifiedTime(FileHandle &handle) override;
 	bool FileExists(const string &filename) override;
 	void RemoveFile(const string &filename) override;
+	bool ListFiles(const string &directory, const std::function<void(const string &, bool)> &callback,
+	               FileOpener *opener = nullptr);
 	void Seek(FileHandle &handle, idx_t location) override;
 	bool CanHandleFile(const string &fpath) override;
 	bool CanSeek() override {
