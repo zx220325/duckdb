@@ -35,8 +35,8 @@ find_library(rados NAMES rados)
 find_library(radosstriper NAMES radosstriper)
 
 target_link_libraries(httpfs_loadable_extension duckdb_mbedtls
-                     ${ssl}  ${crypto}  -lstdc++fs  ${radosstriper} ${rados})
-target_link_libraries(httpfs_extension duckdb_mbedtls ${ssl} ${crypto} -lstdc++fs  ${radosstriper} ${rados})
+                     ${ssl}  ${crypto}  -lstdc++fs -lrt ${radosstriper} ${rados})
+target_link_libraries(httpfs_extension duckdb_mbedtls ${ssl} ${crypto} -lstdc++fs -lrt ${radosstriper} ${rados})
 
 if(MINGW)
   find_package(ZLIB)

@@ -35,15 +35,14 @@ public:
 };
 
 class CephFileSystem : public FileSystem {
+
 public:
 	void doReadFromCeph(FileHandle &handle, string url, idx_t file_offset, char *buffer_out, idx_t buffer_out_len);
 
 	unique_ptr<FileHandle> OpenFile(const string &path, uint8_t flags, FileLockType lock,
 	                                FileCompressionType compression, FileOpener *opener);
 
-	vector<string> Glob(const string &path, FileOpener *opener = nullptr) override {
-		return {path}; // FIXME
-	}
+	vector<string> Glob(const string &path, FileOpener *opener = nullptr) override;
 
 	// FS methods
 	void Read(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) override;
@@ -55,6 +54,7 @@ public:
 	time_t GetLastModifiedTime(FileHandle &handle) override;
 	bool FileExists(const string &filename) override;
 	void RemoveFile(const string &filename) override;
+	void RemoveDirectory(const std::string &directory) override;
 	bool ListFiles(const string &directory, const std::function<void(const string &, bool)> &callback,
 	               FileOpener *opener = nullptr);
 	void Seek(FileHandle &handle, idx_t location) override;
@@ -71,9 +71,11 @@ public:
 	string GetName() const override {
 		return "CephFileSystem";
 	}
+	friend class CephFileHandle;
 
 protected:
 	virtual duckdb::unique_ptr<CephFileHandle> CreateHandle(const string &path, uint8_t flags, FileLockType lock,
 	                                                        FileCompressionType compression, FileOpener *opener);
+	// CephConnector cs;
 };
 } // namespace duckdb

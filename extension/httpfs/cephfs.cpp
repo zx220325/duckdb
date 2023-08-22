@@ -11,39 +11,13 @@
 // #include "httpfs.hpp"
 
 #include <chrono>
+#include <duckdb/function/scalar/string_functions.hpp>
 #include <fstream>
 #include <iostream>
 #include <map>
 #include <string>
 #include <thread>
-
 namespace duckdb {
-
-static inline void ParseUrl(const string &url, string &pool_out, string &ns_out, string &path_out) {
-	if (url.rfind("ceph://", 0) != 0) {
-		throw IOException("URL needs to start ceph://");
-	}
-	auto pool_slash = url.find("//", 7);
-	if (pool_slash == string::npos) {
-		throw IOException("URL needs to contain a pool");
-	}
-	pool_out = url.substr(7, pool_slash - 7);
-	if (pool_out.empty()) {
-		throw IOException("URL needs to contain a non-empty pool");
-	}
-	auto ns_slash = url.find("//", pool_slash + 2);
-
-	if (ns_slash == string::npos) {
-		throw IOException("URL needs to contain a ns");
-	}
-	ns_out = url.substr(pool_slash + 2, ns_slash - pool_slash - 2);
-
-	path_out = url.substr(ns_slash + 2);
-
-	if (path_out.empty()) {
-		throw IOException("URL needs to contain a path");
-	}
-}
 
 CephFileHandle::CephFileHandle(FileSystem &fs, string path, uint8_t flags)
     : FileHandle(fs, path), flags(flags), length(0), buffer_available(0), buffer_idx(0), file_offset(0),
@@ -55,19 +29,20 @@ void CephFileHandle::Initialize(FileOpener *opener) {
 	// Initialize the read buffer now that we know the file exists
 	ParseUrl(path, pool, ns, obj_name);
 	auto &&cs = CephConnector::connnector_singleton();
-	length = cs->Size(obj_name, pool, ns);
+	// auto &&cs = ((CephFileSystem &)file_system).cs;
+	length = cs.Size(obj_name, pool, ns, &last_modified);
 	// as we cache small files in ceph connector
-	if ((flags & FileFlags::FILE_FLAGS_READ) && length > CephConnector::SMALL_FILE_THRESHOLD) {
+	if (flags & FileFlags::FILE_FLAGS_READ) {
 		read_buffer = duckdb::unique_ptr<data_t[]>(new data_t[READ_BUFFER_LEN]);
 	}
 }
 
 void CephFileSystem::doReadFromCeph(FileHandle &handle, string url, idx_t file_offset, char *buffer_out,
                                     idx_t buffer_out_len) {
-	auto &&cs = CephConnector::connnector_singleton();
 	std::string pool, ns, path;
 	ParseUrl(url, pool, ns, path);
-	auto ret = cs->Read(path, pool, ns, file_offset, buffer_out, buffer_out_len);
+	auto &&cs = CephConnector::connnector_singleton();
+	auto ret = cs.Read(path, pool, ns, file_offset, buffer_out, buffer_out_len);
 }
 
 unique_ptr<CephFileHandle> CephFileSystem::CreateHandle(const string &path, uint8_t flags, FileLockType lock,
@@ -158,35 +133,35 @@ int64_t CephFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes)
 
 void CephFileSystem::Write(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) {
 	throw NotImplementedException("Random write for ceph files not implemented");
+	/*
+	while (bytes_written < nr_bytes) {
+	    auto curr_location = location + bytes_written;
+
+	    if (curr_location != hfh.file_offset) {
+	        throw InternalException("Non-sequential write not supported!");
+	    }
+
+	    auto bytes_to_write = nr_bytes - bytes_written;
+	    auto ret =
+	        cs.Write(hfh.obj_name, hfh.pool, hfh.ns, hfh.file_offset, (char *)buffer + bytes_written, bytes_to_write);
+	    D_ASSERT(ret == bytes_to_write);
+	    hfh.file_offset += bytes_to_write;
+	    bytes_written += bytes_to_write;
+	}
+	return nr_bytes;
+	*/
 }
 
 int64_t CephFileSystem::Write(FileHandle &handle, void *buffer, int64_t nr_bytes) {
 	auto &hfh = (CephFileHandle &)handle;
-	// Write(handle, buffer, nr_bytes, hfh.file_offset);
 	if (!(hfh.flags & FileFlags::FILE_FLAGS_WRITE)) {
 		throw InternalException("Write called on file not opened in write mode");
 	}
 	if (hfh.file_offset != 0) {
 		throw InternalException("Currently only whole writes are supported");
 	}
-	idx_t location = 0;
-	int64_t bytes_written = 0;
 	auto &&cs = CephConnector::connnector_singleton();
-	while (bytes_written < nr_bytes) {
-		auto curr_location = location + bytes_written;
-
-		if (curr_location != hfh.file_offset) {
-			throw InternalException("Non-sequential write not supported!");
-		}
-
-		auto bytes_to_write = nr_bytes - bytes_written;
-		auto ret =
-		    cs->Write(hfh.obj_name, hfh.pool, hfh.ns, hfh.file_offset, (char *)buffer + bytes_written, bytes_to_write);
-		D_ASSERT(ret == bytes_to_write);
-		hfh.file_offset += bytes_to_write;
-		bytes_written += bytes_to_write;
-	}
-	return nr_bytes;
+	return cs.Write(hfh.obj_name, hfh.pool, hfh.ns, (char *)buffer, nr_bytes);
 }
 
 void CephFileSystem::FileSync(FileHandle &handle) {
@@ -203,19 +178,34 @@ time_t CephFileSystem::GetLastModifiedTime(FileHandle &handle) {
 }
 
 bool CephFileSystem::FileExists(const string &filename) {
-	auto &&cs = CephConnector::connnector_singleton();
 	string path, pool, ns;
 	ParseUrl(filename, pool, ns, path);
-	return cs->Exist(path, pool, ns);
+	auto &&cs = CephConnector::connnector_singleton();
+	return cs.Exist(path, pool, ns);
 }
 
 void CephFileSystem::RemoveFile(const string &filename) {
-	auto &&cs = CephConnector::connnector_singleton();
 	string path, pool, ns;
 	ParseUrl(filename, pool, ns, path);
-	auto ret = cs->Delete(path, pool, ns);
+	auto &&cs = CephConnector::connnector_singleton();
+	auto ret = cs.Delete(path, pool, ns);
+	if (!ret) {
+		throw std::runtime_error("delete " + filename + " failed");
+	}
 	D_ASSERT(ret);
 }
+
+void CephFileSystem::RemoveDirectory(const std::string &directory) {
+	string path, pool, ns;
+	ParseUrl(directory, pool, ns, path);
+	auto &&cs = CephConnector::connnector_singleton();
+	for (auto &obj : cs.ListFiles(path, pool, ns)) {
+		if (!cs.Delete(obj, pool, ns)) {
+			throw std::runtime_error("delete " + directory + " failed");
+		}
+	}
+}
+
 void CephFileSystem::Seek(FileHandle &handle, idx_t location) {
 	auto &sfh = (CephFileHandle &)handle;
 	sfh.file_offset = location;
@@ -228,15 +218,40 @@ bool CephFileSystem::CanHandleFile(const string &fpath) {
 
 bool CephFileSystem::ListFiles(const string &directory, const std::function<void(const string &, bool)> &callback,
                                FileOpener *opener) {
-	auto &&cs = CephConnector::connnector_singleton();
 	string path, pool, ns;
 	ParseUrl(directory, pool, ns, path);
-	auto objects = cs->ListNS(pool, ns);
-	for (auto &object : objects) {
-		if (object.rfind(path, 0) == 0) {
-			callback(object, true);
-		}
+	auto &&cs = CephConnector::connnector_singleton();
+	if (path == "refresh_index") {
+		cs.RefreshFileMeta(pool, ns);
+		return true;
+	}
+	for (auto &object : cs.ListFiles(path, pool, ns)) {
+		callback("ceph://" + pool + "//" + ns + "//" + object, false);
 	}
 	return true;
+}
+
+vector<string> CephFileSystem::Glob(const string &filename, FileOpener *opener) {
+	// AWS matches on prefix, not glob pattern, so we take a substring until the first wildcard char for the aws calls
+	string path, pool, ns;
+	ParseUrl(filename, pool, ns, path);
+
+	auto first_wildcard_pos = path.find_first_of("?*[\\");
+	if (first_wildcard_pos == string::npos) {
+		if (FileExists(filename)) {
+			return {filename};
+		}
+		return {};
+	}
+
+	string shared_path_prefix = path.substr(0, first_wildcard_pos);
+	vector<string> ret;
+	auto &&cs = CephConnector::connnector_singleton();
+	for (auto &obj : cs.ListFiles(shared_path_prefix, pool, ns)) {
+		if (LikeFun::Glob(obj.c_str(), obj.size(), path.c_str(), path.size())) {
+			ret.push_back("ceph://" + pool + "//" + ns + "//" + obj);
+		}
+	}
+	return ret;
 }
 } // namespace duckdb
