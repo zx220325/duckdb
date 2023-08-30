@@ -25,7 +25,7 @@ public:
 
 	// Read buffer
 	duckdb::unique_ptr<data_t[]> read_buffer;
-	constexpr static idx_t READ_BUFFER_LEN = 4 << 20;
+	constexpr static idx_t READ_BUFFER_LEN = 1 << 20;
 
 	string obj_name, pool, ns;
 

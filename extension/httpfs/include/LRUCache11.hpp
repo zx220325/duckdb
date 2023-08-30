@@ -121,7 +121,7 @@ public:
 		Guard g(lock_);
 		const auto iter = cache_.find(k);
 		if (iter != cache_.end()) {
-			iter->second->value = v;
+			iter->second->value = std::move(v);
 			keys_.splice(keys_.begin(), keys_, iter->second);
 			return;
 		}
@@ -133,6 +133,15 @@ public:
 	/**
 	  for backward compatibity. redirects to tryGetCopy()
 	 */
+	bool tryOperate(const Key &kIn, std::function<bool(Value &)> func) {
+		Guard g(lock_);
+		auto iter = cache_.find(kIn);
+		if (iter == cache_.end()) {
+			return false;
+		}
+		return func(iter->second->value);
+	}
+
 	bool tryGet(const Key &kIn, Value &vOut) {
 		return tryGetCopy(kIn, vOut);
 	}

@@ -1,7 +1,9 @@
 #pragma once
 
 #include "LRUCache11.hpp"
+#include "duckdb/common/file_system.hpp"
 #include "radosstriper/libradosstriper.hpp"
+
 #include <array>
 #include <atomic>
 #include <cstdlib>
@@ -13,7 +15,6 @@
 #include <string>
 #include <string_view>
 #include <vector>
-#include "duckdb/common/file_system.hpp"
 
 namespace duckdb {
 
@@ -52,32 +53,44 @@ private:
 	const std::shared_ptr<librados::IoCtx> &io_ctx_;
 };
 
-
-
 class CephConnector {
+	struct MetaCache {
+		// Read info
+		int64_t length;
+		time_t last_modified;
+		time_t cache_time;
+		int64_t buffer_start;
+		// int64_t buffer_end;
+
+		// to cache PARQUET footer and meta
+		constexpr static int64_t PARQ_FOOTER_LEN = 1 << 15;
+		std::unique_ptr<char[]> parquet_footer;
+	};
+
 public:
 	static CephConnector &connnector_singleton();
 
-	 int64_t Size(const std::string &path, const std::string &pool, const std::string &ns,
-	                           time_t *mtm = nullptr);
+	int64_t Size(const std::string &path, const std::string &pool, const std::string &ns, time_t *mtm = nullptr);
 
-	 bool Exist(const std::string &path, const std::string &pool, const std::string &ns);
+	bool Exist(const std::string &path, const std::string &pool, const std::string &ns);
 
-	 int64_t Read(const std::string &path, const std::string &pool, const std::string &ns,
-	                           int64_t file_offset, char *buffer_out, int64_t buffer_out_len);
+	int64_t Read(const std::string &path, const std::string &pool, const std::string &ns, int64_t file_offset,
+	             char *buffer_out, int64_t buffer_out_len);
 
-	 int64_t Write(const std::string &path, const std::string &pool, const std::string &ns, char *buffer_in, int64_t buffer_in_len, bool update = true);
+	int64_t Write(const std::string &path, const std::string &pool, const std::string &ns, char *buffer_in,
+	              int64_t buffer_in_len, bool update = true);
 
-	 bool Delete(const std::string &path, const std::string &pool, const std::string &ns, bool update=true);
+	bool Delete(const std::string &path, const std::string &pool, const std::string &ns, bool update = true);
 
-	 std::vector<std::string> ListFiles(const std::string &pathprefix, const std::string &pool,
-	                                                 const std::string &ns);
+	std::vector<std::string> ListFiles(const std::string &pathprefix, const std::string &pool, const std::string &ns);
 
 	void RefreshFileMeta(const std::string &pool, const std::string &ns);
 
 private:
 	int64_t doRead(const std::string &path, const std::string &pool, const std::string &ns, int64_t file_offset,
 	               char *buffer_out, int64_t buffer_out_len);
+
+	MetaCache initMeta(const std::string &path, const std::string &pool, const std::string &ns);
 
 	CephConnector() = default;
 	~CephConnector() = default;
@@ -96,6 +109,9 @@ private:
 
 	std::map<std::pair<std::string, std::string>, tsl::htrie_map<char, std::uint64_t>> raw_file_meta;
 	std::map<std::pair<std::string, std::string>, tsl::htrie_map<char, std::uint64_t>> increment_file_meta;
+
+	lru11::Cache<size_t, MetaCache> cache_ {1024};
+
 	static pid_t pid_;
 };
 } // namespace duckdb

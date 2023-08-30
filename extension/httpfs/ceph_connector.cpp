@@ -27,6 +27,7 @@ namespace duckdb {
 	} while (0)
 
 static constexpr int64_t SPLIT_SIZE = 1024 * 1024 * 1024;
+static constexpr int64_t VALID_DURATION = 60000; // 60s
 
 static std::string getEnv(const std::string &ENV) {
 	auto ptr = std::getenv(ENV.c_str());
@@ -84,6 +85,11 @@ static std::uint64_t get_ns_time() {
 	return std::chrono::duration_cast<std::chrono::nanoseconds>(tm.time_since_epoch()).count();
 }
 
+static std::uint64_t get_ms_time() {
+	auto tm = std::chrono::steady_clock::now();
+	return std::chrono::duration_cast<std::chrono::milliseconds>(tm.time_since_epoch()).count();
+}
+
 static const std::string CEPH_OBJ_SUFFIX = ".0000000000000000";
 
 CephConnector &CephConnector::connnector_singleton() {
@@ -126,47 +132,144 @@ void CephConnector::initialize() {
 	}
 }
 
-int64_t CephConnector::Size(const std::string &path, const std::string &pool, const std::string &ns, time_t *mtm) {
+[[nodiscard]] static inline size_t BKDRHash(const std::string &path, const std::string &pool, const std::string &ns) {
+	size_t ret = 0;
+	auto hash = [&ret](const std::string &s) {
+		for (auto &ch : s) {
+			ret = ret * 131 + ch;
+		}
+	};
+	hash(path);
+	hash(pool);
+	hash(ns);
+	return ret;
+}
+CephConnector::MetaCache CephConnector::initMeta(const std::string &path, const std::string &pool,
+                                                 const std::string &ns) {
+	CephConnector::MetaCache ret;
 	auto combrs = this->getCombStriper(pool, ns);
-	CHECK_RETRUN(!combrs, -1);
+	if (!combrs) {
+		ret.length = ret.last_modified = -1;
+		return ret;
+	}
 	uint64_t size = 0;
 	timespec tsp {};
 	combrs->rs->stat2(path, &size, &tsp);
-	if (mtm) {
-		*mtm = tsp.tv_sec;
+	if (size == 0) {
+		ceph::bufferlist bufferlist;
+		if (combrs->io_ctx->getxattr(path + CEPH_OBJ_SUFFIX, "striper.layout.object_size", bufferlist) <= 0) {
+			size = -1;
+		}
 	}
-	return size;
+	ret.length = size;
+	ret.last_modified = tsp.tv_sec;
+	ret.cache_time = get_ms_time();
+	return ret;
+}
+
+int64_t CephConnector::Size(const std::string &path, const std::string &pool, const std::string &ns, time_t *mtm) {
+
+	auto key = BKDRHash(path, pool, ns);
+	int64_t ret;
+	if (cache_.tryOperate(key, [&ret, &mtm](MetaCache &mc) {
+		    if (mc.cache_time + VALID_DURATION < get_ms_time()) {
+			    return false;
+		    }
+		    if (mtm) {
+			    *mtm = mc.last_modified;
+		    }
+		    ret = mc.length;
+		    return true;
+	    })) {
+		return ret;
+	}
+
+	auto cc = initMeta(path, pool, ns);
+	if (mtm) {
+		*mtm = cc.last_modified;
+	}
+	ret = cc.length;
+	cache_.insert(key, std::move(cc));
+
+	return ret;
 }
 
 bool CephConnector::Exist(const std::string &path, const std::string &pool, const std::string &ns) {
-	auto combrs = this->getCombStriper(pool, ns);
-	CHECK_RETRUN(!combrs, false);
-	ceph::bufferlist bufferlist;
-	auto ret = combrs->io_ctx->getxattr(path + CEPH_OBJ_SUFFIX, "striper.layout.object_size", bufferlist);
-	return ret >= 0;
+	auto key = BKDRHash(path, pool, ns);
+	bool ret;
+	if (cache_.tryOperate(key, [&ret](MetaCache &mc) {
+		    if (mc.cache_time + VALID_DURATION < get_ms_time()) {
+			    return false;
+		    }
+		    ret = mc.length >= 0;
+		    return true;
+	    })) {
+		return ret;
+	}
+	auto cc = initMeta(path, pool, ns);
+	ret = cc.length >= 0;
+	cache_.insert(key, std::move(cc));
+	return ret;
 }
 
 int64_t CephConnector::doRead(const std::string &path, const std::string &pool, const std::string &ns,
                               int64_t file_offset, char *buffer_out, int64_t buffer_out_len) {
 	auto combrs = getCombStriper(pool, ns);
 	CHECK_RETRUN(!combrs, -1);
+	ceph::bufferlist bl;
+	auto ret = combrs->rs->read(path, &bl, buffer_out_len, file_offset);
+	CHECK_RETRUN(ret <= 0, -1);
 	int64_t has_read = 0;
-	for (int64_t offset = 0; offset < buffer_out_len; offset += SPLIT_SIZE) {
-		ceph::bufferlist bl;
-		auto ret = combrs->rs->read(path, &bl, std::min(SPLIT_SIZE, buffer_out_len - offset), offset + file_offset);
-		CHECK_RETRUN(ret <= 0, -1);
-		for (auto &buf : bl.buffers()) {
-			memcpy(buffer_out + has_read, buf.c_str(), buf.length());
-			has_read += buf.length();
-		}
+	for (auto &buf : bl.buffers()) {
+		std::memcpy(buffer_out + has_read, buf.c_str(), buf.length());
+		has_read += buf.length();
 	}
 	return has_read;
 }
 
 int64_t CephConnector::Read(const std::string &path, const std::string &pool, const std::string &ns,
                             int64_t file_offset, char *buffer_out, int64_t buffer_out_len) {
+	// return doRead(path, pool, ns, file_offset, buffer_out, buffer_out_len);
 	auto sz = Size(path, pool, ns);
-	return doRead(path, pool, ns, file_offset, buffer_out, buffer_out_len);
+	CHECK_RETRUN(sz <= 0, sz);
+	auto key = BKDRHash(path, pool, ns);
+	int64_t buffer_offset = 0;
+	auto to_read = buffer_out_len;
+	if (cache_.tryOperate(key, [&file_offset, &buffer_out_len, &buffer_out, &to_read](MetaCache &cc) {
+		    if (cc.cache_time + VALID_DURATION < get_ms_time()) {
+			    return false;
+		    }
+		    if (cc.parquet_footer && file_offset + buffer_out_len > cc.buffer_start) {
+			    auto can_read = std::min(file_offset + buffer_out_len - cc.buffer_start, buffer_out_len);
+			    auto buffer_offset = std::max(0L, file_offset - cc.buffer_start);
+			    std::memcpy(buffer_out + buffer_out_len - can_read, cc.parquet_footer.get() + buffer_offset, can_read);
+			    to_read -= can_read;
+			    return true;
+		    }
+		    return false;
+	    })) {
+		if (to_read == 0) {
+			return buffer_out_len;
+		}
+	}
+	// special optimize for parquet
+	if (buffer_out_len == 8 && file_offset + 8 == sz) {
+		auto can_read = std::min(MetaCache::PARQ_FOOTER_LEN, sz);
+		auto tmp = std::make_unique<char[]>(can_read);
+		auto can_read_offset = sz - can_read;
+		auto ret = doRead(path, pool, ns, can_read_offset, tmp.get(), can_read);
+		CHECK_RETRUN(ret == -1, ret);
+		std::memcpy(buffer_out, tmp.get() + can_read - 8, 8);
+		cache_.tryOperate(key, [&tmp, &can_read_offset](MetaCache &cc) {
+			cc.buffer_start = can_read_offset;
+			cc.parquet_footer = std::move(tmp);
+			return true;
+		});
+	} else {
+		auto ret = doRead(path, pool, ns, file_offset, buffer_out + buffer_offset, to_read);
+		CHECK_RETRUN(ret == -1, ret);
+	}
+	return buffer_out_len;
 }
 
 int64_t CephConnector::Write(const std::string &path, const std::string &pool, const std::string &ns, char *buffer_in,
@@ -217,6 +320,12 @@ int64_t CephConnector::Write(const std::string &path, const std::string &pool, c
 		mq.send(&elem, sizeof(elem), 0);
 		increment_file_meta[key][path] = tm;
 	}
+	auto key = BKDRHash(path, pool, ns);
+	cache_.tryOperate(key, [&buffer_in_len](MetaCache &cc) {
+		cc.length = cc.buffer_start = buffer_in_len;
+		cc.last_modified = cc.cache_time = get_ms_time();
+		return true;
+	});
 	return buffer_in_len;
 }
 
@@ -241,6 +350,9 @@ bool CephConnector::Delete(const std::string &path, const std::string &pool, con
 		auto elem = Conv2Elem(path, pool, ns, tm);
 		mq.send(&elem, sizeof(elem), 0);
 		increment_file_meta[key][path] = tm;
+
+		auto hash_key = BKDRHash(path, pool, ns);
+		cache_.remove(hash_key);
 	}
 	return true;
 }
