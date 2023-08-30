@@ -86,13 +86,20 @@ public:
 
 	void RefreshFileMeta(const std::string &pool, const std::string &ns);
 
+	void disable_cache() {
+		cache_.clear();
+		enable_cache_ = false;
+	}
+
 private:
 	int64_t doRead(const std::string &path, const std::string &pool, const std::string &ns, int64_t file_offset,
 	               char *buffer_out, int64_t buffer_out_len);
 
 	MetaCache initMeta(const std::string &path, const std::string &pool, const std::string &ns);
 
-	CephConnector() = default;
+	CephConnector() {
+		initialize();
+	};
 	~CephConnector() = default;
 	CephConnector(const CephConnector &) = delete;
 	CephConnector &operator=(const CephConnector &) = delete;
@@ -110,7 +117,8 @@ private:
 	std::map<std::pair<std::string, std::string>, tsl::htrie_map<char, std::uint64_t>> raw_file_meta;
 	std::map<std::pair<std::string, std::string>, tsl::htrie_map<char, std::uint64_t>> increment_file_meta;
 
-	lru11::Cache<size_t, MetaCache> cache_ {1024};
+	lru11::Cache<size_t, MetaCache, std::mutex> cache_ {1 << 15};
+	bool enable_cache_ {true};
 
 	static pid_t pid_;
 };

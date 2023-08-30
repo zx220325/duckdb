@@ -50,7 +50,7 @@ Lock::~Lock() {
 }
 
 static constexpr const char *CLUSTER_NAME = "ceph";
-pid_t CephConnector::pid_ = -1;
+pid_t CephConnector::pid_ = getpid();
 
 namespace fs = std::experimental::filesystem;
 
@@ -95,8 +95,10 @@ static const std::string CEPH_OBJ_SUFFIX = ".0000000000000000";
 CephConnector &CephConnector::connnector_singleton() {
 	static CephConnector instance;
 	auto cur_pid = getpid();
+	// detecting fork
 	if (cur_pid != pid_) {
 		instance.initialize();
+		// instance.disable_cache();
 		pid_ = cur_pid;
 	}
 	return instance;
@@ -171,7 +173,7 @@ int64_t CephConnector::Size(const std::string &path, const std::string &pool, co
 
 	auto key = BKDRHash(path, pool, ns);
 	int64_t ret;
-	if (cache_.tryOperate(key, [&ret, &mtm](MetaCache &mc) {
+	if (enable_cache_ && cache_.tryOperate(key, [&ret, &mtm](MetaCache &mc) {
 		    if (mc.cache_time + VALID_DURATION < get_ms_time()) {
 			    return false;
 		    }
@@ -189,7 +191,8 @@ int64_t CephConnector::Size(const std::string &path, const std::string &pool, co
 		*mtm = cc.last_modified;
 	}
 	ret = cc.length;
-	cache_.insert(key, std::move(cc));
+	if (enable_cache_)
+		cache_.insert(key, std::move(cc));
 
 	return ret;
 }
@@ -197,7 +200,7 @@ int64_t CephConnector::Size(const std::string &path, const std::string &pool, co
 bool CephConnector::Exist(const std::string &path, const std::string &pool, const std::string &ns) {
 	auto key = BKDRHash(path, pool, ns);
 	bool ret;
-	if (cache_.tryOperate(key, [&ret](MetaCache &mc) {
+	if (enable_cache_ && cache_.tryOperate(key, [&ret](MetaCache &mc) {
 		    if (mc.cache_time + VALID_DURATION < get_ms_time()) {
 			    return false;
 		    }
@@ -208,7 +211,8 @@ bool CephConnector::Exist(const std::string &path, const std::string &pool, cons
 	}
 	auto cc = initMeta(path, pool, ns);
 	ret = cc.length >= 0;
-	cache_.insert(key, std::move(cc));
+	if (enable_cache_)
+		cache_.insert(key, std::move(cc));
 	return ret;
 }
 
@@ -235,7 +239,7 @@ int64_t CephConnector::Read(const std::string &path, const std::string &pool, co
 	auto key = BKDRHash(path, pool, ns);
 	int64_t buffer_offset = 0;
 	auto to_read = buffer_out_len;
-	if (cache_.tryOperate(key, [&file_offset, &buffer_out_len, &buffer_out, &to_read](MetaCache &cc) {
+	if (enable_cache_ && cache_.tryOperate(key, [&file_offset, &buffer_out_len, &buffer_out, &to_read](MetaCache &cc) {
 		    if (cc.cache_time + VALID_DURATION < get_ms_time()) {
 			    return false;
 		    }
@@ -253,7 +257,7 @@ int64_t CephConnector::Read(const std::string &path, const std::string &pool, co
 		}
 	}
 	// special optimize for parquet
-	if (buffer_out_len == 8 && file_offset + 8 == sz) {
+	if (enable_cache_ && buffer_out_len == 8 && file_offset + 8 == sz) {
 		auto can_read = std::min(MetaCache::PARQ_FOOTER_LEN, sz);
 		auto tmp = std::make_unique<char[]>(can_read);
 		auto can_read_offset = sz - can_read;
@@ -320,12 +324,14 @@ int64_t CephConnector::Write(const std::string &path, const std::string &pool, c
 		mq.send(&elem, sizeof(elem), 0);
 		increment_file_meta[key][path] = tm;
 	}
-	auto key = BKDRHash(path, pool, ns);
-	cache_.tryOperate(key, [&buffer_in_len](MetaCache &cc) {
-		cc.length = cc.buffer_start = buffer_in_len;
-		cc.last_modified = cc.cache_time = get_ms_time();
-		return true;
-	});
+	if (enable_cache_) {
+		auto key = BKDRHash(path, pool, ns);
+		cache_.tryOperate(key, [&buffer_in_len](MetaCache &cc) {
+			cc.length = cc.buffer_start = buffer_in_len;
+			cc.last_modified = cc.cache_time = get_ms_time();
+			return true;
+		});
+	}
 	return buffer_in_len;
 }
 
@@ -352,7 +358,8 @@ bool CephConnector::Delete(const std::string &path, const std::string &pool, con
 		increment_file_meta[key][path] = tm;
 
 		auto hash_key = BKDRHash(path, pool, ns);
-		cache_.remove(hash_key);
+		if (enable_cache_)
+			cache_.remove(hash_key);
 	}
 	return true;
 }
