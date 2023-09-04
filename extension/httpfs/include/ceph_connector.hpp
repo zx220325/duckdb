@@ -3,9 +3,11 @@
 #include "LRUCache11.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "radosstriper/libradosstriper.hpp"
+#include "tsl/htrie_map.h"
 
 #include <array>
 #include <atomic>
+#include <boost/interprocess/ipc/message_queue.hpp>
 #include <cstdlib>
 #include <iostream>
 #include <map>
@@ -86,6 +88,8 @@ public:
 
 	void RefreshFileMeta(const std::string &pool, const std::string &ns);
 
+	void PersistChangeInMessageQueueToCeph();
+
 	void disable_cache() {
 		cache_.clear();
 		enable_cache_ = false;
@@ -96,6 +100,8 @@ private:
 	               char *buffer_out, int64_t buffer_out_len);
 
 	MetaCache initMeta(const std::string &path, const std::string &pool, const std::string &ns);
+
+	void doPersistChangeInMessageQueueToCeph(boost::interprocess::message_queue *mq_ptr);
 
 	CephConnector() {
 		initialize();

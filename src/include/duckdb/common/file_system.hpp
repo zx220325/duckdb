@@ -10,14 +10,14 @@
 
 #include "duckdb/common/constants.hpp"
 #include "duckdb/common/enums/file_compression_type.hpp"
+#include "duckdb/common/enums/file_glob_options.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_buffer.hpp"
+#include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/common/vector.hpp"
-#include "duckdb/common/enums/file_glob_options.hpp"
-#include "duckdb/common/optional_ptr.hpp"
+
 #include <functional>
-#include "tsl/htrie_map.h"
 #include <unistd.h>
 
 #undef CreateDirectory
@@ -30,16 +30,6 @@ class ClientContext;
 class DatabaseInstance;
 class FileOpener;
 class FileSystem;
-
-static const std::string CEPH_INDEX_MQ_NAME = std::to_string(getuid()) +  "_ceph_index_mq";
-static const std::string CEPH_INDEX_FILE = ".ceph_index";
-static const size_t CEPH_INDEX_MQ_SIZE = 1 << 16;
-
-struct Elem {
-	std::array<char, 240> path;
-	std::size_t sz;
-	std::uint64_t tm;
-};
 
 enum class FileType {
 	//! Regular file

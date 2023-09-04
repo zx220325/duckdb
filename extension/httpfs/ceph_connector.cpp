@@ -3,13 +3,13 @@
 #include "radosstriper/libradosstriper.hpp"
 
 #include <boost/date_time/posix_time/posix_time.hpp>
-#include <boost/interprocess/ipc/message_queue.hpp>
 #include <chrono>
 #include <cstring>
 #include <ctime>
 #include <experimental/filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <pwd.h>
 #include <random>
 #include <sstream>
@@ -25,6 +25,18 @@ namespace duckdb {
 			return value;                                                                                              \
 		}                                                                                                              \
 	} while (0)
+
+struct Elem {
+	std::array<char, 240> path;
+	std::size_t sz;
+	std::uint64_t tm;
+};
+
+static const std::string CEPH_INDEX_MQ_NAME = std::to_string(getuid()) + "_ceph_index_mq";
+static const std::string CEPH_INDEX_FILE = ".ceph_index";
+// (1 << 18) * (1 << 8)  64MB in total
+static const size_t CEPH_INDEX_MQ_SIZE = 1 << 18;
+static const size_t MQ_SIZE_THRESHOLD = CEPH_INDEX_MQ_SIZE - 1024;
 
 static constexpr int64_t SPLIT_SIZE = 1024 * 1024 * 1024;
 static constexpr int64_t VALID_DURATION = 60000; // 60s
@@ -67,10 +79,9 @@ static inline std::string GetLocalCache(const std::string &pool, const std::stri
 	return dir + pool + "__" + ns + "__index";
 }
 
-static duckdb::Elem Conv2Elem(const std::string &path, const std::string &pool, const std::string &ns,
-                              std::uint64_t tm) {
+static Elem Conv2Elem(const std::string &path, const std::string &pool, const std::string &ns, std::uint64_t tm) {
 	auto s = "ceph://" + pool + "//" + ns + "//" + path;
-	duckdb::Elem elem;
+	Elem elem;
 	if (s.size() + 16 > sizeof(Elem)) {
 		throw std::runtime_error("path is to long");
 	}
@@ -318,8 +329,11 @@ int64_t CephConnector::Write(const std::string &path, const std::string &pool, c
 		// std::unique_lock<std::mutex> lk(mtx_);
 		auto key = std::make_pair(pool, ns);
 		auto tm = (get_ns_time() << 1) | 1;
-		boost::interprocess::message_queue mq(boost::interprocess::open_or_create, duckdb::CEPH_INDEX_MQ_NAME.c_str(),
-		                                      duckdb::CEPH_INDEX_MQ_SIZE, sizeof(duckdb::Elem));
+		boost::interprocess::message_queue mq(boost::interprocess::open_or_create, CEPH_INDEX_MQ_NAME.c_str(),
+		                                      CEPH_INDEX_MQ_SIZE, sizeof(Elem));
+		if (mq.get_num_msg() > MQ_SIZE_THRESHOLD) {
+			doPersistChangeInMessageQueueToCeph(&mq);
+		}
 		auto elem = Conv2Elem(path, pool, ns, tm);
 		mq.send(&elem, sizeof(elem), 0);
 		increment_file_meta[key][path] = tm;
@@ -351,8 +365,11 @@ bool CephConnector::Delete(const std::string &path, const std::string &pool, con
 	if (update) {
 		auto key = std::make_pair(pool, ns);
 		auto tm = get_ns_time() << 1;
-		boost::interprocess::message_queue mq(boost::interprocess::open_or_create, duckdb::CEPH_INDEX_MQ_NAME.c_str(),
-		                                      duckdb::CEPH_INDEX_MQ_SIZE, sizeof(duckdb::Elem));
+		boost::interprocess::message_queue mq(boost::interprocess::open_or_create, CEPH_INDEX_MQ_NAME.c_str(),
+		                                      CEPH_INDEX_MQ_SIZE, sizeof(Elem));
+		if (mq.get_num_msg() > MQ_SIZE_THRESHOLD) {
+			doPersistChangeInMessageQueueToCeph(&mq);
+		}
 		auto elem = Conv2Elem(path, pool, ns, tm);
 		mq.send(&elem, sizeof(elem), 0);
 		increment_file_meta[key][path] = tm;
@@ -481,6 +498,63 @@ void CephConnector::RefreshFileMeta(const std::string &pool, const std::string &
 			}
 		}
 	}
+}
+
+void CephConnector::doPersistChangeInMessageQueueToCeph(boost::interprocess::message_queue *mq_ptr) {
+	auto &&mq = *mq_ptr;
+	if (mq.get_num_msg() == 0) {
+		return;
+	}
+	Elem elem;
+	size_t recv_size;
+	unsigned int pq;
+	std::map<std::pair<std::string, std::string>, tsl::htrie_map<char, std::uint64_t>> mp;
+	while (mq.try_receive(&elem, sizeof(elem), recv_size, pq)) {
+		auto url = std::string_view(elem.path.data(), elem.sz);
+		std::string path, pool, ns;
+		ParseUrl(url, pool, ns, path);
+		if (path == CEPH_INDEX_FILE) {
+			continue;
+		}
+		auto key = std::make_pair(pool, ns);
+		auto it = mp[key].find(path);
+		if (it == mp[key].end() || it.value() < elem.tm) {
+			mp[key][path] = elem.tm;
+		}
+	}
+	// boost::interprocess::message_queue::remove(CEPH_INDEX_MQ_NAME.c_str());
+	for (auto &[key, v] : mp) {
+		auto &&[pool, ns] = key;
+		tsl::htrie_map<char, std::uint64_t> map_deserialized;
+		if (Exist(CEPH_INDEX_FILE, pool, ns)) {
+			auto sz = Size(CEPH_INDEX_FILE, pool, ns);
+			if (sz > 0) {
+				std::string buf;
+				buf.resize(sz);
+				Read(CEPH_INDEX_FILE, pool, ns, 0, buf.data(), sz);
+				tsl::deserializer dserial(buf.c_str());
+				map_deserialized = tsl::htrie_map<char, std::uint64_t>::deserialize(dserial);
+			}
+		}
+		std::string key_buffer;
+		for (auto it = v.begin(); it != v.end(); ++it) {
+			it.key(key_buffer);
+			auto mit = map_deserialized.find(key_buffer);
+			if (mit == map_deserialized.end() || mit.value() < it.value()) {
+				map_deserialized[key_buffer] = it.value();
+			}
+		}
+		std::string buf;
+		tsl::serializer serial(buf);
+		map_deserialized.serialize(serial);
+		Write(CEPH_INDEX_FILE, pool, ns, const_cast<char *>(buf.c_str()), buf.size(), false);
+	}
+}
+void CephConnector::PersistChangeInMessageQueueToCeph() {
+
+	boost::interprocess::message_queue mq(boost::interprocess::open_or_create, CEPH_INDEX_MQ_NAME.c_str(),
+	                                      CEPH_INDEX_MQ_SIZE, sizeof(Elem));
+	doPersistChangeInMessageQueueToCeph(&mq);
 }
 
 std::shared_ptr<CephConnector::CombStriper> CephConnector::getCombStriper(const std::string &pool,

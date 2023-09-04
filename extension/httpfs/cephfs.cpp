@@ -218,9 +218,14 @@ bool CephFileSystem::CanHandleFile(const string &fpath) {
 
 bool CephFileSystem::ListFiles(const string &directory, const std::function<void(const string &, bool)> &callback,
                                FileOpener *opener) {
+	auto &&cs = CephConnector::connnector_singleton();
+	if (directory == "ceph://persist_index") {
+		cs.PersistChangeInMessageQueueToCeph();
+		return true;
+	}
 	string path, pool, ns;
 	ParseUrl(directory, pool, ns, path);
-	auto &&cs = CephConnector::connnector_singleton();
+
 	if (path == "refresh_index") {
 		cs.RefreshFileMeta(pool, ns);
 		return true;
