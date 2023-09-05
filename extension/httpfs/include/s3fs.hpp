@@ -25,6 +25,7 @@ struct AWSEnvironmentCredentialsProvider {
 	static constexpr const char *SESSION_TOKEN_ENV_VAR = "AWS_SESSION_TOKEN";
 	static constexpr const char *DUCKDB_ENDPOINT_ENV_VAR = "AWS_S3_ENDPOINT";
 	static constexpr const char *DUCKDB_USE_SSL_ENV_VAR = "AWS_S3_USE_SSL";
+	static constexpr const char *DUCKDB_S3_URL_STYLE = "AWS_S3_URL_STYLE";
 
 	explicit AWSEnvironmentCredentialsProvider(DBConfig &config) : config(config) {};
 

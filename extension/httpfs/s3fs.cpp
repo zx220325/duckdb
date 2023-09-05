@@ -161,14 +161,16 @@ void AWSEnvironmentCredentialsProvider::SetAll() {
 	this->SetExtensionOptionValue("s3_session_token", this->SESSION_TOKEN_ENV_VAR);
 	this->SetExtensionOptionValue("s3_endpoint", this->DUCKDB_ENDPOINT_ENV_VAR);
 	this->SetExtensionOptionValue("s3_use_ssl", this->DUCKDB_USE_SSL_ENV_VAR);
+	this->SetExtensionOptionValue("s3_url_style", this->DUCKDB_S3_URL_STYLE);
 }
 
-static string get_env_var(const char *env_var_name) {
+static bool tryGetEnv(const char *env_var_name, string &value) {
 	auto evar = std::getenv(env_var_name);
 	if (evar != NULL) {
-		return string(evar);
+		value = string(evar);
+		return true;
 	}
-	return "";
+	return false;
 }
 
 S3AuthParams S3AuthParams::ReadFrom(FileOpener *opener) {
@@ -178,65 +180,85 @@ S3AuthParams S3AuthParams::ReadFrom(FileOpener *opener) {
 	string session_token;
 	string endpoint;
 	string url_style;
-	bool s3_url_compatibility_mode;
-	bool use_ssl = true;
+	bool use_ssl;
+	bool s3_url_compatibility_mode = false;
 	Value value;
 	if (opener == nullptr) {
-		region = get_env_var(AWSEnvironmentCredentialsProvider::REGION_ENV_VAR);
-		access_key_id = get_env_var(AWSEnvironmentCredentialsProvider::ACCESS_KEY_ENV_VAR);
-		secret_access_key = get_env_var(AWSEnvironmentCredentialsProvider::SECRET_KEY_ENV_VAR);
-		session_token = get_env_var(AWSEnvironmentCredentialsProvider::SESSION_TOKEN_ENV_VAR);
-		endpoint = get_env_var(AWSEnvironmentCredentialsProvider::DUCKDB_ENDPOINT_ENV_VAR);
-		if (StringUtil::Lower(get_env_var(AWSEnvironmentCredentialsProvider::DUCKDB_USE_SSL_ENV_VAR)) == "false") {
+		string value;
+		if (tryGetEnv(AWSEnvironmentCredentialsProvider::REGION_ENV_VAR, value)) {
+			region = value;
+		}
+		if (tryGetEnv(AWSEnvironmentCredentialsProvider::ACCESS_KEY_ENV_VAR, value)) {
+			access_key_id = value;
+		}
+		if (tryGetEnv(AWSEnvironmentCredentialsProvider::SECRET_KEY_ENV_VAR, value)) {
+			secret_access_key = value;
+		}
+		if (tryGetEnv(AWSEnvironmentCredentialsProvider::SESSION_TOKEN_ENV_VAR, value)) {
+			session_token = value;
+		}
+		if (tryGetEnv(AWSEnvironmentCredentialsProvider::DUCKDB_ENDPOINT_ENV_VAR, value)) {
+			endpoint = value;
+		} else {
+			endpoint = "s3.amazonaws.com";
+		}
+		if (tryGetEnv(AWSEnvironmentCredentialsProvider::DUCKDB_S3_URL_STYLE, value)) {
+			url_style = value;
+		} else {
+			url_style = endpoint == "s3.amazonaws.com" ? "vhost" : "path";
+		}
+		if (tryGetEnv(AWSEnvironmentCredentialsProvider::DUCKDB_USE_SSL_ENV_VAR, value) &&
+		    StringUtil::Lower(value) == "true") {
+			use_ssl = true;
+		} else {
 			use_ssl = false;
 		}
-	}
-
-	if (FileOpener::TryGetCurrentSetting(opener, "s3_region", value)) {
-		region = value.ToString();
-	}
-
-	if (FileOpener::TryGetCurrentSetting(opener, "s3_access_key_id", value)) {
-		access_key_id = value.ToString();
-	}
-
-	if (FileOpener::TryGetCurrentSetting(opener, "s3_secret_access_key", value)) {
-		secret_access_key = value.ToString();
-	}
-
-	if (FileOpener::TryGetCurrentSetting(opener, "s3_session_token", value)) {
-		session_token = value.ToString();
-	}
-
-	if (FileOpener::TryGetCurrentSetting(opener, "s3_endpoint", value)) {
-		endpoint = value.ToString();
 	} else {
-		endpoint = "s3.amazonaws.com";
-	}
-
-	if (FileOpener::TryGetCurrentSetting(opener, "s3_url_style", value)) {
-		auto val_str = value.ToString();
-		if (!(val_str == "vhost" || val_str != "path" || val_str != "")) {
-			throw std::runtime_error(
-			    "Incorrect setting found for s3_url_style, allowed values are: 'path' and 'vhost'");
+		if (FileOpener::TryGetCurrentSetting(opener, "s3_region", value)) {
+			region = value.ToString();
 		}
-		url_style = val_str;
-	} else {
-		url_style = "vhost";
-	}
 
-	if (FileOpener::TryGetCurrentSetting(opener, "s3_use_ssl", value)) {
-		use_ssl = value.GetValue<bool>();
-	} else {
-		// use_ssl = true;
-	}
+		if (FileOpener::TryGetCurrentSetting(opener, "s3_access_key_id", value)) {
+			access_key_id = value.ToString();
+		}
 
-	if (FileOpener::TryGetCurrentSetting(opener, "s3_url_compatibility_mode", value)) {
-		s3_url_compatibility_mode = value.GetValue<bool>();
-	} else {
-		s3_url_compatibility_mode = false;
-	}
+		if (FileOpener::TryGetCurrentSetting(opener, "s3_secret_access_key", value)) {
+			secret_access_key = value.ToString();
+		}
 
+		if (FileOpener::TryGetCurrentSetting(opener, "s3_session_token", value)) {
+			session_token = value.ToString();
+		}
+
+		if (FileOpener::TryGetCurrentSetting(opener, "s3_endpoint", value)) {
+			endpoint = value.ToString();
+		} else {
+			endpoint = "s3.amazonaws.com";
+		}
+
+		if (FileOpener::TryGetCurrentSetting(opener, "s3_url_style", value)) {
+			auto val_str = value.ToString();
+			if (!(val_str == "vhost" || val_str != "path" || val_str != "")) {
+				throw std::runtime_error(
+				    "Incorrect setting found for s3_url_style, allowed values are: 'path' and 'vhost'");
+			}
+			url_style = val_str;
+		} else {
+			url_style = "vhost";
+		}
+
+		if (FileOpener::TryGetCurrentSetting(opener, "s3_use_ssl", value)) {
+			use_ssl = value.GetValue<bool>();
+		} else {
+			use_ssl = true;
+		}
+
+		if (FileOpener::TryGetCurrentSetting(opener, "s3_url_compatibility_mode", value)) {
+			s3_url_compatibility_mode = value.GetValue<bool>();
+		} else {
+			s3_url_compatibility_mode = false;
+		}
+	}
 	return {region,   access_key_id, secret_access_key, session_token,
 	        endpoint, url_style,     use_ssl,           s3_url_compatibility_mode};
 }
