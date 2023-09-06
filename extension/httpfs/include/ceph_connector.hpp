@@ -20,6 +20,16 @@
 
 namespace duckdb {
 
+struct Elem {
+	std::array<char, 240> path;
+	std::size_t sz;
+	std::uint64_t tm;
+};
+
+extern const std::string CEPH_INDEX_MQ_NAME;
+// (1 << 18) * (1 << 8)  64MB in total
+extern const size_t CEPH_INDEX_MQ_SIZE;
+
 static inline void ParseUrl(std::string_view url, std::string &pool_out, std::string &ns_out, std::string &path_out) {
 	if (url.rfind("ceph://", 0) != 0) {
 		throw std::runtime_error("URL needs to start ceph://");
@@ -88,7 +98,7 @@ public:
 
 	void RefreshFileMeta(const std::string &pool, const std::string &ns);
 
-	void PersistChangeInMessageQueueToCeph();
+	void PersistChangeInMessageQueueToCeph(boost::interprocess::message_queue *mq_ptr);
 
 	void disable_cache() {
 		cache_.clear();
@@ -100,8 +110,6 @@ private:
 	               char *buffer_out, int64_t buffer_out_len);
 
 	MetaCache initMeta(const std::string &path, const std::string &pool, const std::string &ns);
-
-	void doPersistChangeInMessageQueueToCeph(boost::interprocess::message_queue *mq_ptr);
 
 	CephConnector() {
 		initialize();

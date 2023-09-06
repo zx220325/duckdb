@@ -26,16 +26,11 @@ namespace duckdb {
 		}                                                                                                              \
 	} while (0)
 
-struct Elem {
-	std::array<char, 240> path;
-	std::size_t sz;
-	std::uint64_t tm;
-};
+const std::string CEPH_INDEX_MQ_NAME = std::to_string(getuid()) + "_ceph_index_mq";
 
-static const std::string CEPH_INDEX_MQ_NAME = std::to_string(getuid()) + "_ceph_index_mq";
-static const std::string CEPH_INDEX_FILE = ".ceph_index";
 // (1 << 18) * (1 << 8)  64MB in total
-static const size_t CEPH_INDEX_MQ_SIZE = 1 << 18;
+const size_t CEPH_INDEX_MQ_SIZE = 1 << 18;
+static const std::string CEPH_INDEX_FILE = ".ceph_index";
 static const size_t MQ_SIZE_THRESHOLD = CEPH_INDEX_MQ_SIZE - 1024;
 
 static constexpr int64_t SPLIT_SIZE = 1024 * 1024 * 1024;
@@ -332,7 +327,7 @@ int64_t CephConnector::Write(const std::string &path, const std::string &pool, c
 		boost::interprocess::message_queue mq(boost::interprocess::open_or_create, CEPH_INDEX_MQ_NAME.c_str(),
 		                                      CEPH_INDEX_MQ_SIZE, sizeof(Elem));
 		if (mq.get_num_msg() > MQ_SIZE_THRESHOLD) {
-			doPersistChangeInMessageQueueToCeph(&mq);
+			PersistChangeInMessageQueueToCeph(&mq);
 		}
 		auto elem = Conv2Elem(path, pool, ns, tm);
 		mq.send(&elem, sizeof(elem), 0);
@@ -368,7 +363,7 @@ bool CephConnector::Delete(const std::string &path, const std::string &pool, con
 		boost::interprocess::message_queue mq(boost::interprocess::open_or_create, CEPH_INDEX_MQ_NAME.c_str(),
 		                                      CEPH_INDEX_MQ_SIZE, sizeof(Elem));
 		if (mq.get_num_msg() > MQ_SIZE_THRESHOLD) {
-			doPersistChangeInMessageQueueToCeph(&mq);
+			PersistChangeInMessageQueueToCeph(&mq);
 		}
 		auto elem = Conv2Elem(path, pool, ns, tm);
 		mq.send(&elem, sizeof(elem), 0);
@@ -500,7 +495,7 @@ void CephConnector::RefreshFileMeta(const std::string &pool, const std::string &
 	}
 }
 
-void CephConnector::doPersistChangeInMessageQueueToCeph(boost::interprocess::message_queue *mq_ptr) {
+void CephConnector::PersistChangeInMessageQueueToCeph(boost::interprocess::message_queue *mq_ptr) {
 	auto &&mq = *mq_ptr;
 	if (mq.get_num_msg() == 0) {
 		return;
@@ -549,12 +544,6 @@ void CephConnector::doPersistChangeInMessageQueueToCeph(boost::interprocess::mes
 		map_deserialized.serialize(serial);
 		Write(CEPH_INDEX_FILE, pool, ns, const_cast<char *>(buf.c_str()), buf.size(), false);
 	}
-}
-void CephConnector::PersistChangeInMessageQueueToCeph() {
-
-	boost::interprocess::message_queue mq(boost::interprocess::open_or_create, CEPH_INDEX_MQ_NAME.c_str(),
-	                                      CEPH_INDEX_MQ_SIZE, sizeof(Elem));
-	doPersistChangeInMessageQueueToCeph(&mq);
 }
 
 std::shared_ptr<CephConnector::CombStriper> CephConnector::getCombStriper(const std::string &pool,

@@ -218,11 +218,16 @@ bool CephFileSystem::CanHandleFile(const string &fpath) {
 
 bool CephFileSystem::ListFiles(const string &directory, const std::function<void(const string &, bool)> &callback,
                                FileOpener *opener) {
-	auto &&cs = CephConnector::connnector_singleton();
+
 	if (directory == "ceph://persist_index") {
-		cs.PersistChangeInMessageQueueToCeph();
+		boost::interprocess::message_queue mq(boost::interprocess::open_or_create, CEPH_INDEX_MQ_NAME.c_str(),
+		                                      CEPH_INDEX_MQ_SIZE, sizeof(Elem));
+		if (mq.get_num_msg() > 0) {
+			CephConnector::connnector_singleton().PersistChangeInMessageQueueToCeph(&mq);
+		}
 		return true;
 	}
+	auto &&cs = CephConnector::connnector_singleton();
 	string path, pool, ns;
 	ParseUrl(directory, pool, ns, path);
 
