@@ -226,13 +226,16 @@ int64_t CephConnector::doRead(const std::string &path, const std::string &pool, 
                               int64_t file_offset, char *buffer_out, int64_t buffer_out_len) {
 	auto combrs = getCombStriper(pool, ns);
 	CHECK_RETRUN(!combrs, -1);
-	ceph::bufferlist bl;
-	auto ret = combrs->rs->read(path, &bl, buffer_out_len, file_offset);
-	CHECK_RETRUN(ret <= 0, -1);
 	int64_t has_read = 0;
-	for (auto &buf : bl.buffers()) {
-		std::memcpy(buffer_out + has_read, buf.c_str(), buf.length());
-		has_read += buf.length();
+	// issue: https://stackoverflow.com/questions/70368651/why-cant-linux-write-more-than-2147479552-bytes
+	for (int64_t offset = 0; offset < buffer_out_len; offset += SPLIT_SIZE) {
+		ceph::bufferlist bl;
+		auto ret = combrs->rs->read(path, &bl, std::min(SPLIT_SIZE, buffer_out_len - offset), offset + file_offset);
+		CHECK_RETRUN(ret <= 0, -1);
+		for (auto &buf : bl.buffers()) {
+			memcpy(buffer_out + has_read, buf.c_str(), buf.length());
+			has_read += buf.length();
+		}
 	}
 	return has_read;
 }
