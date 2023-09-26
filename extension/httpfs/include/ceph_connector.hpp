@@ -74,9 +74,9 @@ class CephConnector {
 		int64_t buffer_start;
 		// int64_t buffer_end;
 
-		// to cache PARQUET footer and meta
-		constexpr static int64_t PARQ_FOOTER_LEN = 1 << 15;
-		std::unique_ptr<char[]> parquet_footer;
+		// to cache PARQUET footer and meta and very small files
+		constexpr static int64_t READ_BUFFER_LEN = 1 << 15;
+		std::unique_ptr<char[]> read_buffer;
 	};
 
 public:
@@ -131,7 +131,10 @@ private:
 	std::map<std::pair<std::string, std::string>, tsl::htrie_map<char, std::uint64_t>> raw_file_meta;
 	std::map<std::pair<std::string, std::string>, tsl::htrie_map<char, std::uint64_t>> increment_file_meta;
 
-	lru11::Cache<size_t, MetaCache, std::mutex> cache_ {1 << 15};
+	using KeyT = std::tuple<std::string, std::string, std::string>;
+	lru11::Cache<KeyT, MetaCache, std::mutex> cache_ {1 << 15};
+
+	std::mutex mtx_;
 	bool enable_cache_ {true};
 
 	static pid_t pid_;

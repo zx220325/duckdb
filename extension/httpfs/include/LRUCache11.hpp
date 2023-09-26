@@ -32,10 +32,10 @@
 #include <cstdint>
 #include <functional>
 #include <list>
+#include <map>
 #include <mutex>
 #include <stdexcept>
 #include <thread>
-#include <unordered_map>
 
 namespace lru11 {
 /*
@@ -84,7 +84,7 @@ public:
  *	thread-safe
  */
 template <class Key, class Value, class Lock = NullLock,
-          class Map = std::unordered_map<Key, typename std::list<KeyValuePair<Key, Value>>::iterator>>
+          class Map = std::map<Key, typename std::list<KeyValuePair<Key, Value>>::iterator>>
 class Cache {
 public:
 	typedef KeyValuePair<Key, Value> node_type;

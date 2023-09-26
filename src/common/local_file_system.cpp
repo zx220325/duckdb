@@ -12,7 +12,9 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <iostream>
 #include <sys/stat.h>
+#include <unordered_map>
 
 #ifndef _WIN32
 #include <dirent.h>
@@ -118,23 +120,54 @@ bool LocalFileSystem::IsPipe(const string &filename) {
 #define O_DIRECT 0
 #endif
 
-struct UnixFileHandle : public FileHandle {
+struct UnixFileHandleImpl {
 public:
-	UnixFileHandle(FileSystem &file_system, string path, int fd) : FileHandle(file_system, std::move(path)), fd(fd) {
+	UnixFileHandleImpl(int fd, uint8_t flags, idx_t length)
+	    : fd(fd), flags(flags), length(length), buffer_available(0), buffer_idx(0), file_offset(0), buffer_start(0),
+	      buffer_end(0) {
+		if (flags & FileFlags::FILE_FLAGS_READ) {
+			buffer_length = MinValue<idx_t>(READ_BUFFER_LEN, length);
+			read_buffer = unique_ptr<data_t[]>(new data_t[buffer_length]);
+		}
 	}
-	~UnixFileHandle() override {
-		UnixFileHandle::Close();
-	}
-
-	int fd;
-
-public:
-	void Close() override {
+	~UnixFileHandleImpl() {
 		if (fd != -1) {
 			close(fd);
 			fd = -1;
 		}
-	};
+	}
+	int fd;
+	// File handle info
+	uint8_t flags;
+	idx_t length;
+	time_t last_modified;
+
+	// Read info
+	idx_t buffer_available;
+	idx_t buffer_idx;
+	idx_t file_offset;
+	idx_t buffer_start;
+	idx_t buffer_end;
+	idx_t buffer_length;
+
+	// Read buffer
+	unique_ptr<data_t[]> read_buffer;
+	constexpr static idx_t READ_BUFFER_LEN = 1 << 20;
+};
+
+struct UnixFileHandle : public FileHandle {
+public:
+	UnixFileHandle(FileSystem &file_system, string path, unique_ptr<UnixFileHandleImpl> ufh_impl)
+	    : FileHandle(file_system, std::move(path)), ufh_impl(std::move(ufh_impl)) {
+	}
+	~UnixFileHandle() override {
+		Close();
+	}
+
+	unique_ptr<UnixFileHandleImpl> ufh_impl;
+
+public:
+	void Close() override {};
 };
 
 static FileType GetFileTypeInternal(int fd) { // LCOV_EXCL_START
@@ -208,7 +241,9 @@ unique_ptr<FileHandle> LocalFileSystem::OpenFile(const string &path_p, uint8_t f
 		open_flags |= O_DIRECT | O_SYNC;
 #endif
 	}
+
 	int fd = open(path.c_str(), open_flags, 0666);
+
 	if (fd == -1) {
 		throw IOException("Cannot open file \"%s\": %s", path, strerror(errno));
 	}
@@ -238,20 +273,30 @@ unique_ptr<FileHandle> LocalFileSystem::OpenFile(const string &path_p, uint8_t f
 			}
 		}
 	}
-	return make_uniq<UnixFileHandle>(*this, path, fd);
+	struct stat s;
+	if (fstat(fd, &s) == -1) {
+		throw IOException("Could not get stat of file \"%s\" ", path);
+	}
+	auto ufh_impl = make_uniq<UnixFileHandleImpl>(fd, flags, s.st_size);
+	ufh_impl->last_modified = s.st_mtime;
+	auto ufh = make_uniq<UnixFileHandle>(*this, path, std::move(ufh_impl));
+
+	return ufh;
 }
 
 void LocalFileSystem::SetFilePointer(FileHandle &handle, idx_t location) {
-	int fd = handle.Cast<UnixFileHandle>().fd;
+	auto &&ufh = handle.Cast<UnixFileHandle>().ufh_impl;
+	int fd = ufh->fd;
 	off_t offset = lseek(fd, location, SEEK_SET);
 	if (offset == (off_t)-1) {
 		throw IOException("Could not seek to location %lld for file \"%s\": %s", location, handle.path,
 		                  strerror(errno));
 	}
+	ufh->file_offset = offset;
 }
 
 idx_t LocalFileSystem::GetFilePointer(FileHandle &handle) {
-	int fd = handle.Cast<UnixFileHandle>().fd;
+	int fd = handle.Cast<UnixFileHandle>().ufh_impl->fd;
 	off_t position = lseek(fd, 0, SEEK_CUR);
 	if (position == (off_t)-1) {
 		throw IOException("Could not get file position file \"%s\": %s", handle.path, strerror(errno));
@@ -259,9 +304,10 @@ idx_t LocalFileSystem::GetFilePointer(FileHandle &handle) {
 	return position;
 }
 
-void LocalFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) {
-	int fd = handle.Cast<UnixFileHandle>().fd;
+static void doRead(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) {
+	int fd = handle.Cast<UnixFileHandle>().ufh_impl->fd;
 	auto read_buffer = char_ptr_cast(buffer);
+
 	while (nr_bytes > 0) {
 		int64_t bytes_read = pread(fd, read_buffer, nr_bytes, location);
 		if (bytes_read == -1) {
@@ -277,17 +323,94 @@ void LocalFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, i
 	}
 }
 
-int64_t LocalFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes) {
-	int fd = handle.Cast<UnixFileHandle>().fd;
-	int64_t bytes_read = read(fd, buffer, nr_bytes);
-	if (bytes_read == -1) {
-		throw IOException("Could not read from file \"%s\": %s", handle.path, strerror(errno));
+void LocalFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) {
+
+	auto &&ufh = *(handle.Cast<UnixFileHandle>().ufh_impl);
+
+	idx_t to_read = nr_bytes;
+	idx_t buffer_offset = 0;
+
+	// Don't buffer when DirectIO is set.
+	if (ufh.flags & FileFlags::FILE_FLAGS_DIRECT_IO && to_read > 0) {
+		doRead(handle, buffer, to_read, location);
+		ufh.buffer_available = 0;
+		ufh.buffer_idx = 0;
+		ufh.file_offset = location + nr_bytes;
+		return;
 	}
-	return bytes_read;
+
+	// paruet footer optimization
+	if (!(location >= ufh.buffer_start && location < ufh.buffer_end) &&
+	    (to_read == 8 && to_read + location == ufh.length)) {
+		doRead(handle, ufh.read_buffer.get(), ufh.buffer_length, ufh.length - ufh.buffer_length);
+		ufh.buffer_start = ufh.file_offset = ufh.length - ufh.buffer_length;
+		ufh.buffer_available = ufh.buffer_length;
+		ufh.buffer_idx = 0;
+		ufh.buffer_end = ufh.buffer_start + ufh.buffer_available;
+	}
+
+	if (location >= ufh.buffer_start && location < ufh.buffer_end) {
+		ufh.file_offset = location;
+		ufh.buffer_idx = location - ufh.buffer_start;
+		ufh.buffer_available = (ufh.buffer_end - ufh.buffer_start) - ufh.buffer_idx;
+	} else {
+		// reset buffer
+		ufh.buffer_available = 0;
+		ufh.buffer_idx = 0;
+		ufh.file_offset = location;
+	}
+
+	while (to_read > 0) {
+		auto buffer_read_len = MinValue<idx_t>(ufh.buffer_available, to_read);
+		if (buffer_read_len > 0) {
+			D_ASSERT(ufh.buffer_start + ufh.buffer_idx + buffer_read_len <= ufh.buffer_end);
+			memcpy((char *)buffer + buffer_offset, ufh.read_buffer.get() + ufh.buffer_idx, buffer_read_len);
+
+			buffer_offset += buffer_read_len;
+			to_read -= buffer_read_len;
+
+			ufh.buffer_idx += buffer_read_len;
+			ufh.buffer_available -= buffer_read_len;
+			ufh.file_offset += buffer_read_len;
+		}
+
+		if (to_read > 0 && ufh.buffer_available == 0) {
+			idx_t new_buffer_available = 0;
+			if (ufh.read_buffer) {
+				new_buffer_available = MinValue<idx_t>(ufh.buffer_length, ufh.length - ufh.file_offset);
+			}
+
+			// Bypass buffer if we read more than buffer size
+			if (to_read > new_buffer_available) {
+				doRead(handle, (char *)buffer + buffer_offset, to_read, location + buffer_offset);
+				ufh.buffer_available = 0;
+				ufh.buffer_idx = 0;
+				ufh.file_offset += to_read;
+				break;
+			} else {
+				doRead(handle, (char *)ufh.read_buffer.get(), new_buffer_available, ufh.file_offset);
+				ufh.buffer_available = new_buffer_available;
+				ufh.buffer_idx = 0;
+				ufh.buffer_start = ufh.file_offset;
+				ufh.buffer_end = ufh.buffer_start + new_buffer_available;
+			}
+		}
+	}
+}
+
+int64_t LocalFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes) {
+	auto &&ufh = *(handle.Cast<UnixFileHandle>().ufh_impl);
+	if (ufh.length == static_cast<idx_t>(-1)) {
+		return -1;
+	}
+	idx_t max_read = ufh.length - ufh.file_offset;
+	nr_bytes = MinValue<idx_t>(max_read, nr_bytes);
+	Read(handle, buffer, nr_bytes, ufh.file_offset);
+	return nr_bytes;
 }
 
 void LocalFileSystem::Write(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) {
-	int fd = handle.Cast<UnixFileHandle>().fd;
+	int fd = handle.Cast<UnixFileHandle>().ufh_impl->fd;
 	auto write_buffer = char_ptr_cast(buffer);
 	while (nr_bytes > 0) {
 		int64_t bytes_written = pwrite(fd, write_buffer, nr_bytes, location);
@@ -301,7 +424,7 @@ void LocalFileSystem::Write(FileHandle &handle, void *buffer, int64_t nr_bytes, 
 }
 
 int64_t LocalFileSystem::Write(FileHandle &handle, void *buffer, int64_t nr_bytes) {
-	int fd = handle.Cast<UnixFileHandle>().fd;
+	int fd = handle.Cast<UnixFileHandle>().ufh_impl->fd;
 	int64_t bytes_written = write(fd, buffer, nr_bytes);
 	if (bytes_written == -1) {
 		throw IOException("Could not write file \"%s\": %s", handle.path, strerror(errno));
@@ -310,33 +433,25 @@ int64_t LocalFileSystem::Write(FileHandle &handle, void *buffer, int64_t nr_byte
 }
 
 int64_t LocalFileSystem::GetFileSize(FileHandle &handle) {
-	int fd = handle.Cast<UnixFileHandle>().fd;
-	struct stat s;
-	if (fstat(fd, &s) == -1) {
-		return -1;
-	}
-	return s.st_size;
+	return handle.Cast<UnixFileHandle>().ufh_impl->length;
 }
 
 time_t LocalFileSystem::GetLastModifiedTime(FileHandle &handle) {
-	int fd = handle.Cast<UnixFileHandle>().fd;
-	struct stat s;
-	if (fstat(fd, &s) == -1) {
-		return -1;
-	}
-	return s.st_mtime;
+	return handle.Cast<UnixFileHandle>().ufh_impl->last_modified;
 }
 
 FileType LocalFileSystem::GetFileType(FileHandle &handle) {
-	int fd = handle.Cast<UnixFileHandle>().fd;
+	int fd = handle.Cast<UnixFileHandle>().ufh_impl->fd;
 	return GetFileTypeInternal(fd);
 }
 
 void LocalFileSystem::Truncate(FileHandle &handle, int64_t new_size) {
-	int fd = handle.Cast<UnixFileHandle>().fd;
+	auto &&ufh = *(handle.Cast<UnixFileHandle>().ufh_impl);
+	int fd = ufh.fd;
 	if (ftruncate(fd, new_size) != 0) {
 		throw IOException("Could not truncate file \"%s\": %s", handle.path, strerror(errno));
 	}
+	ufh.length = new_size;
 }
 
 bool LocalFileSystem::DirectoryExists(const string &directory) {
@@ -355,7 +470,6 @@ bool LocalFileSystem::DirectoryExists(const string &directory) {
 
 void LocalFileSystem::CreateDirectory(const string &directory) {
 	struct stat st;
-
 	if (stat(directory.c_str(), &st) != 0) {
 		/* Directory does not exist. EEXIST for race condition */
 		if (mkdir(directory.c_str(), 0755) != 0 && errno != EEXIST) {
@@ -452,7 +566,7 @@ bool LocalFileSystem::ListFiles(const string &directory, const std::function<voi
 }
 
 void LocalFileSystem::FileSync(FileHandle &handle) {
-	int fd = handle.Cast<UnixFileHandle>().fd;
+	int fd = handle.Cast<UnixFileHandle>().ufh_impl->fd;
 	if (fsync(fd) != 0) {
 		throw FatalException("fsync failed!");
 	}

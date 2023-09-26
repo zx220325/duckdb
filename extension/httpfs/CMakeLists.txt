@@ -25,6 +25,7 @@ build_loadable_extension(httpfs ${PARAMETERS} s3fs.cpp cephfs.cpp  ceph_connecto
 # include_directories(${OPENSSL_INCLUDE_DIR})
 find_library(ssl NAMES ssl)
 find_library(crypto NAMES crypto)
+
 # find_library(ssl NAMES ssl PATHS ../../third_party/openssl/lib NO_DEFAULT_PATH)
 # find_library(crypto NAMES crypto PATHS ../../third_party/openssl/lib NO_DEFAULT_PATH)
 
@@ -35,8 +36,8 @@ find_library(rados NAMES rados)
 find_library(radosstriper NAMES radosstriper)
 
 target_link_libraries(httpfs_loadable_extension duckdb_mbedtls
-                     ${ssl}  ${crypto}  -lstdc++fs -lrt ${radosstriper} ${rados})
-target_link_libraries(httpfs_extension duckdb_mbedtls ${ssl} ${crypto} -lstdc++fs -lrt ${radosstriper} ${rados})
+                     -lstdc++fs -lrt ${radosstriper} ${rados} ${ssl}  ${crypto}  )
+target_link_libraries(httpfs_extension duckdb_mbedtls -lstdc++fs -lrt ${radosstriper} ${rados} ${ssl} ${crypto} )
 
 if(MINGW)
   find_package(ZLIB)

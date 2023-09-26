@@ -125,6 +125,9 @@ void CephFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, id
 
 int64_t CephFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes) {
 	auto &hfh = (CephFileHandle &)handle;
+	if (hfh.length == static_cast<idx_t>(-1)) {
+		return -1;
+	}
 	idx_t max_read = hfh.length - hfh.file_offset;
 	nr_bytes = MinValue<idx_t>(max_read, nr_bytes);
 	Read(handle, buffer, nr_bytes, hfh.file_offset);
