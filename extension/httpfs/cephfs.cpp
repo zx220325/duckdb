@@ -37,12 +37,13 @@ void CephFileHandle::Initialize(FileOpener *opener) {
 	}
 }
 
-void CephFileSystem::doReadFromCeph(FileHandle &handle, string url, idx_t file_offset, char *buffer_out,
-                                    idx_t buffer_out_len) {
+int64_t CephFileSystem::doReadFromCeph(FileHandle &handle, string url, idx_t file_offset, char *buffer_out,
+                                       idx_t buffer_out_len) {
 	std::string pool, ns, path;
 	ParseUrl(url, pool, ns, path);
 	auto &&cs = CephConnector::connnector_singleton();
 	auto ret = cs.Read(path, pool, ns, file_offset, buffer_out, buffer_out_len);
+	return ret;
 }
 
 unique_ptr<CephFileHandle> CephFileSystem::CreateHandle(const string &path, uint8_t flags, FileLockType lock,
@@ -68,7 +69,10 @@ void CephFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, id
 
 	// Don't buffer when DirectIO is set.
 	if (hfh.flags & FileFlags::FILE_FLAGS_DIRECT_IO && to_read > 0) {
-		doReadFromCeph(hfh, hfh.path, location, (char *)buffer, to_read);
+		auto ret = doReadFromCeph(hfh, hfh.path, location, (char *)buffer, to_read);
+		if (ret < 0) {
+			throw std::runtime_error(std::string("failed when read from ceph, ") + strerror(-static_cast<int>(ret)));
+		}
 		hfh.buffer_available = 0;
 		hfh.buffer_idx = 0;
 		hfh.file_offset = location + nr_bytes;
@@ -107,13 +111,23 @@ void CephFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, id
 
 			// Bypass buffer if we read more than buffer size
 			if (to_read > new_buffer_available) {
-				doReadFromCeph(hfh, hfh.path, location + buffer_offset, (char *)buffer + buffer_offset, to_read);
+				auto ret =
+				    doReadFromCeph(hfh, hfh.path, location + buffer_offset, (char *)buffer + buffer_offset, to_read);
+				if (ret < 0) {
+					throw std::runtime_error(std::string("failed when read from ceph, ") +
+					                         strerror(-static_cast<int>(ret)));
+				}
 				hfh.buffer_available = 0;
 				hfh.buffer_idx = 0;
 				hfh.file_offset += to_read;
 				break;
 			} else {
-				doReadFromCeph(hfh, hfh.path, hfh.file_offset, (char *)hfh.read_buffer.get(), new_buffer_available);
+				auto ret =
+				    doReadFromCeph(hfh, hfh.path, hfh.file_offset, (char *)hfh.read_buffer.get(), new_buffer_available);
+				if (ret < 0) {
+					throw std::runtime_error(std::string("failed when read from ceph, ") +
+					                         strerror(-static_cast<int>(ret)));
+				}
 				hfh.buffer_available = new_buffer_available;
 				hfh.buffer_idx = 0;
 				hfh.buffer_start = hfh.file_offset;
@@ -125,8 +139,8 @@ void CephFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, id
 
 int64_t CephFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes) {
 	auto &hfh = (CephFileHandle &)handle;
-	if (hfh.length == static_cast<idx_t>(-1)) {
-		return -1;
+	if (hfh.length < 0) {
+		return hfh.length;
 	}
 	idx_t max_read = hfh.length - hfh.file_offset;
 	nr_bytes = MinValue<idx_t>(max_read, nr_bytes);
@@ -223,10 +237,15 @@ bool CephFileSystem::ListFiles(const string &directory, const std::function<void
                                FileOpener *opener) {
 
 	if (directory == "ceph://persist_index") {
-		boost::interprocess::message_queue mq(boost::interprocess::open_or_create, CEPH_INDEX_MQ_NAME.c_str(),
+		if (get_jfds_username().empty()) {
+			return true;
+		}
+		boost::interprocess::message_queue mq(boost::interprocess::open_or_create, get_jfds_username().data(),
 		                                      CEPH_INDEX_MQ_SIZE, sizeof(Elem));
 		if (mq.get_num_msg() > 0) {
 			CephConnector::connnector_singleton().PersistChangeInMessageQueueToCeph(&mq);
+		} else {
+			boost::interprocess::message_queue::remove(get_jfds_username().data());
 		}
 		return true;
 	}

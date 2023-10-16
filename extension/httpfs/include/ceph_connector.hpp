@@ -26,7 +26,37 @@ struct Elem {
 	std::uint64_t tm;
 };
 
-extern const std::string CEPH_INDEX_MQ_NAME;
+static std::string getEnv(const std::string &ENV) {
+	auto ptr = std::getenv(ENV.c_str());
+	std::string ret;
+	if (ptr) {
+		ret = std::string(ptr);
+	}
+	return ret;
+}
+
+static std::string_view get_jfds_username() {
+	static std::string JDFS_USERNAME([] {
+		std::string username;
+		auto ceph_args = getEnv("CEPH_ARGS");
+		if (!ceph_args.empty()) {
+			auto pos = ceph_args.find("client");
+			if (pos == std::string::npos) {
+				return username;
+			}
+			auto space = ceph_args.find(' ', pos);
+			username = ceph_args.substr(pos, space - pos);
+		} else {
+			username = getEnv("SYS_JDFS_USERNAME");
+			if (username.empty()) {
+				username = getEnv("JDFS_USERNAME");
+			}
+		}
+		return username;
+	}());
+	return JDFS_USERNAME;
+}
+// extern const std::string CEPH_INDEX_MQ_NAME;
 // (1 << 18) * (1 << 8)  64MB in total
 extern const size_t CEPH_INDEX_MQ_SIZE;
 
@@ -109,7 +139,7 @@ private:
 	int64_t doRead(const std::string &path, const std::string &pool, const std::string &ns, int64_t file_offset,
 	               char *buffer_out, int64_t buffer_out_len);
 
-	MetaCache initMeta(const std::string &path, const std::string &pool, const std::string &ns);
+	int initMeta(const std::string &path, const std::string &pool, const std::string &ns, MetaCache* mc);
 
 	CephConnector() {
 		initialize();
@@ -125,7 +155,7 @@ private:
 		std::shared_ptr<libradosstriper::RadosStriper> rs;
 	};
 
-	std::shared_ptr<CombStriper> getCombStriper(const std::string &pool, const std::string &ns);
+	int getCombStriper(const std::string &pool, const std::string &ns, std::shared_ptr<CombStriper> *cs);
 	librados::Rados cluster;
 
 	std::map<std::pair<std::string, std::string>, tsl::htrie_map<char, std::uint64_t>> raw_file_meta;

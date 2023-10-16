@@ -37,7 +37,7 @@ public:
 class CephFileSystem : public FileSystem {
 
 public:
-	void doReadFromCeph(FileHandle &handle, string url, idx_t file_offset, char *buffer_out, idx_t buffer_out_len);
+	int64_t doReadFromCeph(FileHandle &handle, string url, idx_t file_offset, char *buffer_out, idx_t buffer_out_len);
 
 	unique_ptr<FileHandle> OpenFile(const string &path, uint8_t flags, FileLockType lock,
 	                                FileCompressionType compression, FileOpener *opener);
