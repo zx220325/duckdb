@@ -21,6 +21,7 @@ source_files = [
             'cephfs.cpp',
             'ceph_connector.cpp',
             'crypto.cpp',
+            'utils.cpp'
         ]
     ]
 ]

@@ -1,4 +1,5 @@
 #pragma once
+
 #include "duckdb/common/file_system.hpp"
 
 namespace duckdb {
@@ -37,10 +38,11 @@ public:
 class CephFileSystem : public FileSystem {
 
 public:
-	int64_t doReadFromCeph(FileHandle &handle, string url, idx_t file_offset, char *buffer_out, idx_t buffer_out_len);
+	int64_t DoReadFromCeph(FileHandle &handle, const string &url, idx_t file_offset, char *buffer_out,
+	                       idx_t buffer_out_len);
 
 	unique_ptr<FileHandle> OpenFile(const string &path, uint8_t flags, FileLockType lock,
-	                                FileCompressionType compression, FileOpener *opener);
+	                                FileCompressionType compression, FileOpener *opener) override;
 
 	vector<string> Glob(const string &path, FileOpener *opener = nullptr) override;
 
@@ -56,7 +58,7 @@ public:
 	void RemoveFile(const string &filename) override;
 	void RemoveDirectory(const std::string &directory) override;
 	bool ListFiles(const string &directory, const std::function<void(const string &, bool)> &callback,
-	               FileOpener *opener = nullptr);
+	               FileOpener *opener = nullptr) override;
 	void Seek(FileHandle &handle, idx_t location) override;
 	bool CanHandleFile(const string &fpath) override;
 	bool CanSeek() override {
