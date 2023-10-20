@@ -11,11 +11,27 @@ add_extension_definitions()
 include_directories(include ../../third_party/httplib ../parquet/include )
 include_directories(../../third_party/openssl/include)
 
-build_static_extension(httpfs s3fs.cpp cephfs.cpp  ceph_connector.cpp httpfs.cpp crypto.cpp
-                       httpfs_extension.cpp utils.cpp)
+build_static_extension(httpfs
+  ceph_connector.cpp
+  cephfs.cpp
+  crypto.cpp
+  httpfs_extension.cpp
+  httpfs.cpp
+  raw_ceph_connector.cpp
+  s3fs.cpp
+  utils.cpp
+)
 set(PARAMETERS "-warnings")
-build_loadable_extension(httpfs ${PARAMETERS} s3fs.cpp cephfs.cpp  ceph_connector.cpp httpfs.cpp crypto.cpp
-                         httpfs_extension.cpp utils.cpp)
+build_loadable_extension(httpfs ${PARAMETERS}
+  ceph_connector.cpp
+  cephfs.cpp
+  crypto.cpp
+  httpfs_extension.cpp
+  httpfs.cpp
+  raw_ceph_connector.cpp
+  s3fs.cpp
+  utils.cpp
+)
 
 # if(MINGW)
 #   set(OPENSSL_USE_STATIC_LIBS TRUE)

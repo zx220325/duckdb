@@ -15,12 +15,13 @@ source_files = [
     for x in [
         'extension/httpfs/' + s
         for s in [
+            'ceph_connector.cpp',
+            'cephfs.cpp',
+            'crypto.cpp',
             'httpfs_extension.cpp',
             'httpfs.cpp',
+            'raw_ceph_connector.cpp'
             's3fs.cpp',
-            'cephfs.cpp',
-            'ceph_connector.cpp',
-            'crypto.cpp',
             'utils.cpp'
         ]
     ]

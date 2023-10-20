@@ -1,24 +1,40 @@
 #include "include/ceph_connector.hpp"
 
+#include "LRUCache11.hpp"
+#include "boost/interprocess/interprocess_fwd.hpp"
+#include "rados/librados.hpp"
 #include "radosstriper/libradosstriper.hpp"
+#include "raw_ceph_connector.hpp"
+#include "tsl/htrie_map.h"
 #include "utils.hpp"
 
-#include <boost/date_time/posix_time/posix_time.hpp>
+#include <array>
 #include <chrono>
+#include <cstddef>
 #include <cstring>
-#include <ctime>
 #include <experimental/filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
+#include <iterator>
 #include <map>
+#include <memory>
+#include <mutex>
+#include <optional>
 #include <pwd.h>
-#include <random>
+#include <queue>
+#include <set>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <sys/types.h>
+#include <system_error>
+#include <type_traits>
 #include <unistd.h>
+#include <unordered_map>
+#include <utility>
 
-namespace duckdb {
+namespace fs = std::experimental::filesystem;
 
 #define CHECK_RETURN(expr, value)                                                                                      \
 	do {                                                                                                               \
@@ -27,566 +43,718 @@ namespace duckdb {
 		}                                                                                                              \
 	} while (0)
 
-// (1 << 18) * (1 << 8)  64MB in total
-const size_t CEPH_INDEX_MQ_SIZE = 1 << 18;
-static const std::string CEPH_INDEX_FILE = ".ceph_index";
-static const size_t MQ_SIZE_THRESHOLD = CEPH_INDEX_MQ_SIZE - 1024;
+namespace duckdb {
 
-static constexpr int64_t SPLIT_SIZE = 1024 * 1024 * 1024;
-static constexpr int64_t VALID_DURATION = 600000; // 10min
+namespace {
 
-static const std::string LOCK_NAME = "default_lock";
-Lock::Lock(const std::string &path, const std::string &pool, const std::string &ns,
-           const std::shared_ptr<librados::IoCtx> &io_ctx)
-    : path(path), io_ctx(io_ctx) {
-	io_ctx->lock_exclusive(path, LOCK_NAME, "", "", nullptr, 0);
-}
+constexpr const char CEPH_INDEX_FILE[] = ".ceph_index";
 
-Lock::~Lock() {
-	io_ctx->unlock(path, LOCK_NAME, "");
-}
+constexpr std::chrono::minutes CACHE_VALID_DURATION {10};
 
-static constexpr const char *CLUSTER_NAME = "ceph";
-pid_t CephConnector::pid = getpid();
+constexpr std::size_t MQ_SIZE_THRESHOLD = CEPH_INDEX_MQ_SIZE - 1024;
 
-namespace fs = std::experimental::filesystem;
+pid_t current_pid = getpid();
 
-static inline std::string GetLocalCache(const std::string &pool, const std::string &ns, bool create) {
-	struct passwd *pw = getpwuid(getuid());
-	std::string homedir = pw->pw_dir;
+std::optional<fs::path> GetHomeDirectory() {
+	struct passwd *pw = ::getpwuid(getuid());
+	fs::path homedir = pw->pw_dir;
 	if (!fs::exists(homedir)) {
-		return "";
+		return std::nullopt;
 	}
-	std::string dir = homedir + "/.data_core/.cache/";
-	if (!fs::exists(dir) && create) {
-		fs::create_directories(dir);
+	return homedir;
+}
+
+std::optional<fs::path> GetLocalIndexCacheFilePath(const CephNamespace &ns, bool create) {
+	auto path_opt = GetHomeDirectory();
+	if (!path_opt.has_value()) {
+		return std::nullopt;
 	}
-	return dir + pool + "__" + ns + "__index";
-}
 
-static Elem Conv2Elem(const std::string &path, const std::string &pool, const std::string &ns, std::uint64_t tm) {
-	auto s = "ceph://" + pool + "//" + ns + "//" + path;
-	Elem elem;
-	if (s.size() + 16 > sizeof(Elem)) {
-		throw std::runtime_error("path is to long");
+	auto &path = path_opt.value();
+	path /= ".datacore/.cache";
+	if (!fs::exists(path)) {
+		if (create) {
+			fs::create_directories(path);
+		} else {
+			return std::nullopt;
+		}
 	}
-	elem.sz = s.size();
-	memcpy(elem.path.data(), s.data(), s.size());
-	elem.tm = tm;
-	return elem;
+
+	auto filename = [&ns]() {
+		std::ostringstream builder;
+		builder << ns.pool << "__" << ns.ns << "__index";
+		return builder.str();
+	}();
+	path /= filename;
+
+	return path_opt;
 }
 
-static std::int64_t GetTimeNs() {
-	auto tm = std::chrono::steady_clock::now();
-	return std::chrono::duration_cast<std::chrono::nanoseconds>(tm.time_since_epoch()).count();
+struct FileMetaCache {
+	// to cache PARQUET footer and meta and very small files
+	constexpr static std::size_t READ_CACHE_LEN = 1 << 15;
+
+	typename std::chrono::system_clock::time_point cache_time;
+
+	// Read info
+	CephStat stat;
+
+	std::unique_ptr<char[]> read_cache;
+	std::uint64_t read_cache_start_offset;
+
+	bool HasExpired() const noexcept {
+		auto dur = std::chrono::system_clock::now() - cache_time;
+		return dur.count() < 0 || dur > CACHE_VALID_DURATION;
+	}
+};
+
+/// A timestamp value packed with a 1-bit flag.
+struct PackedTimestamp {
+public:
+	static std::optional<PackedTimestamp> Deserialize(const librados::bufferlist &buffer) noexcept {
+		if (buffer.length() != sizeof(PackedTimestamp)) {
+			return std::nullopt;
+		}
+
+		auto flat_buffer = buffer.to_str();
+
+		PackedTimestamp tm;
+		std::memcpy(&tm, flat_buffer.data(), sizeof(PackedTimestamp));
+
+		return tm;
+	}
+
+	PackedTimestamp() noexcept = default;
+
+	PackedTimestamp(std::uint64_t tm, bool flag) noexcept : raw {(tm << 1) | flag} {
+	}
+
+	std::uint64_t GetPacked() const noexcept {
+		return raw;
+	}
+
+	std::uint64_t GetTimestamp() const noexcept {
+		return raw >> 1;
+	}
+
+	bool GetFlag() const noexcept {
+		return raw & 1;
+	}
+
+	librados::bufferlist Serialize() const noexcept {
+		librados::bufferlist buffer;
+		buffer.append(const_cast<char *>(reinterpret_cast<const char *>(this)), sizeof(PackedTimestamp));
+		return buffer;
+	}
+
+private:
+	std::uint64_t raw;
+};
+
+class IndexDeserializer {
+public:
+	explicit IndexDeserializer(const char *input) noexcept : input {input} {
+	}
+
+	template <typename T, typename std::enable_if_t<std::is_trivially_copyable_v<T>> * = nullptr>
+	T operator()() noexcept {
+		T value;
+		std::memcpy(reinterpret_cast<char *>(&value), input, sizeof(T));
+		input += sizeof(T);
+		return value;
+	}
+
+	void operator()(char *value_out, std::size_t value_size) noexcept {
+		std::memcpy(value_out, input, value_size);
+		input += value_size;
+	}
+
+private:
+	const char *input;
+};
+
+std::uint64_t GetTimeNs() noexcept {
+	return std::chrono::nanoseconds {std::chrono::system_clock::now().time_since_epoch()}.count();
 }
 
-static std::int64_t GetTimeMs() {
-	auto tm = std::chrono::steady_clock::now();
-	return std::chrono::duration_cast<std::chrono::milliseconds>(tm.time_since_epoch()).count();
+void MergeIndexes(std::map<std::string, PackedTimestamp> &target,
+                  const std::map<std::string, PackedTimestamp> &src) noexcept {
+	for (auto it = src.begin(); it != src.end(); ++it) {
+		auto target_it = target.find(it->first);
+		if (target_it == target.end() || target_it->second.GetTimestamp() < it->second.GetTimestamp()) {
+			target[it->first] = it->second;
+		}
+	}
 }
 
-static const std::string CEPH_OBJ_SUFFIX = ".0000000000000000";
+void MergeIndexes(tsl::htrie_map<char, PackedTimestamp> &target,
+                  const tsl::htrie_map<char, PackedTimestamp> &src) noexcept {
+	std::string key_buffer;
+	for (auto it = src.begin(); it != src.end(); ++it) {
+		it.key(key_buffer);
+		auto target_it = target.find(key_buffer);
+		if (target_it == target.end() || target_it.value().GetTimestamp() < it.value().GetTimestamp()) {
+			target[key_buffer] = it.value();
+		}
+	}
+}
+
+} // namespace
+
+class CephConnector::FileIndexManager {
+public:
+	explicit FileIndexManager(RawCephConnector &raw) noexcept
+	    : raw {raw}, mu {}, raw_file_meta {}, increment_file_meta {} {
+	}
+
+	void InsertOrUpdate(const CephPath &path) {
+		Update(path, PackedTimestamp {GetTimeNs(), true});
+	}
+
+	void Delete(const CephPath &path) {
+		Update(path, PackedTimestamp {GetTimeNs(), false});
+	}
+
+	std::vector<std::string> ListFiles(const CephPath &prefix) {
+		std::unordered_map<std::string, PackedTimestamp> ret;
+
+		auto collect = [this, &prefix, &ret](
+		                   std::map<CephNamespace, tsl::htrie_map<char, PackedTimestamp>> FileIndexManager::*member) {
+			std::string object_name;
+			auto prefix_range = (this->*member)[prefix.ns].equal_prefix_range(prefix.path);
+			for (auto it = prefix_range.first; it != prefix_range.second; it++) {
+				it.key(object_name);
+				auto eit = ret.find(object_name);
+				if (eit == ret.end() || eit->second.GetTimestamp() < it.value().GetTimestamp()) {
+					ret[object_name] = it.value();
+				}
+			}
+		};
+
+		// Fist collect file names from the local incremental index cache.
+		bool raw_empty = [this, &collect, &prefix]() {
+			std::lock_guard lk {mu};
+			collect(&FileIndexManager::increment_file_meta);
+			return raw_file_meta[prefix.ns].empty();
+		}();
+		if (raw_empty) {
+			LoadIndexFromLocalCache(prefix.ns);
+			PullIndexFromCeph(prefix.ns);
+		}
+
+		// Collect file names from the local copy of the index files.
+		{
+			std::lock_guard lk {mu};
+			collect(&FileIndexManager::raw_file_meta);
+		}
+
+		std::vector<std::string> obj_list;
+		for (auto &[k, v] : ret) {
+			if (v.GetFlag()) {
+				obj_list.push_back(k);
+			}
+		}
+		return obj_list;
+	}
+
+	void Refresh(const CephNamespace &ns) {
+		std::error_code ec;
+		auto object_names = ListObjectsDirect(CephPath {ns, ""}, ec);
+		if (ec) {
+			return;
+		}
+
+		PackedTimestamp query_time {GetTimeNs(), true};
+
+		// Update raw_meta.
+		std::lock_guard lk {mu};
+
+		raw_file_meta[ns].clear();
+		for (std::size_t i = 0; i < object_names.size(); i++) {
+			raw_file_meta[ns][object_names[i]] = query_time;
+		}
+		raw_file_meta[ns].shrink_to_fit();
+
+		PushIndexToCeph(ns, raw_file_meta[ns]);
+	}
+
+	void PersistChangeInMqToCeph() {
+		auto mq = OpenMq();
+		if (mq.get_num_msg() > 0) {
+			PersistChangeInMqToCeph(mq);
+		} else {
+			boost::interprocess::message_queue::remove(GetJdfsUsername().data());
+		}
+	}
+
+private:
+	struct MqMessage {
+		MqMessage() noexcept = default;
+
+		MqMessage(const CephPath &key, PackedTimestamp tm) : path {}, path_len {0}, tm {tm} {
+			auto s = key.ToString();
+			if (s.size() > path.size()) {
+				throw std::runtime_error("path is to long");
+			}
+			std::memcpy(path.data(), s.data(), s.size());
+			path_len = s.size();
+		}
+
+		std::array<char, 240> path;
+		std::size_t path_len;
+		PackedTimestamp tm;
+	};
+
+	static boost::interprocess::message_queue OpenMq() {
+		return boost::interprocess::message_queue {boost::interprocess::open_or_create, GetJdfsUsername().data(),
+		                                           CEPH_INDEX_MQ_SIZE, sizeof(MqMessage)};
+	}
+
+	RawCephConnector &raw;
+	std::mutex mu;
+	std::map<CephNamespace, tsl::htrie_map<char, PackedTimestamp>> raw_file_meta;
+	std::map<CephNamespace, tsl::htrie_map<char, PackedTimestamp>> increment_file_meta;
+
+	void PersistChangeInMqToCeph(boost::interprocess::message_queue &mq) {
+		if (mq.get_num_msg() == 0) {
+			return;
+		}
+
+		MqMessage elem;
+		std::size_t recv_size;
+		unsigned int pq;
+
+		std::map<CephNamespace, tsl::htrie_map<char, PackedTimestamp>> mp;
+		while (mq.try_receive(&elem, sizeof(elem), recv_size, pq)) {
+			auto url = std::string_view(elem.path.data(), elem.path_len);
+			std::string path, pool, ns;
+			ParseUrl(url, pool, ns, path);
+
+			if (path == CEPH_INDEX_FILE) {
+				continue;
+			}
+
+			CephNamespace key {pool, ns};
+			auto it = mp[key].find(path);
+			if (it == mp[key].end() || it.value().GetTimestamp() < elem.tm.GetTimestamp()) {
+				mp[key][path] = elem.tm;
+			}
+		}
+
+		boost::interprocess::message_queue::remove(GetJdfsUsername().data());
+
+		for (auto &[ns, index] : mp) {
+			PushIndexToCeph(ns, index);
+		}
+	}
+
+	void Update(const CephPath &path, PackedTimestamp tm) {
+		auto mq = OpenMq();
+		if (mq.get_num_msg() > MQ_SIZE_THRESHOLD) {
+			PersistChangeInMqToCeph(mq);
+		}
+
+		MqMessage msg {path, tm};
+		mq.send(&msg, sizeof(msg), 0);
+
+		std::lock_guard lk {mu};
+		increment_file_meta[path.ns][path.path] = tm;
+	}
+
+	void PushIndexToCeph(const CephNamespace &ns, const tsl::htrie_map<char, PackedTimestamp> &index) {
+		// Collect updates for each index file.
+		std::unordered_map<std::string, std::map<std::string, PackedTimestamp>> updates;
+
+		std::string oid;
+		for (auto it = index.begin(); it != index.end(); ++it) {
+			it.key(oid);
+			auto tm = it.value();
+
+			fs::path oid_path {oid};
+			auto oid_root = oid_path.root_path();
+
+			do {
+				auto component_name = oid_path.filename();
+				auto parent = oid_path.parent_path();
+				auto index_path = parent / CEPH_INDEX_FILE;
+
+				updates[index_path.string()].emplace(component_name.string(), tm);
+
+				oid_path = std::move(parent);
+			} while (oid_path != oid_root);
+		}
+
+		// Apply the updates.
+		for (const auto &[index_oid, kv_updates] : updates) {
+			CephPath index_path {ns, index_oid};
+
+			std::set<std::string> update_keys;
+			for (const auto &[k, v] : kv_updates) {
+				update_keys.insert(k);
+			}
+
+			std::error_code ec;
+			auto existing_kv =
+			    raw.GetOmapKv<PackedTimestamp>(index_path, update_keys, &PackedTimestamp::Deserialize, ec);
+			if (ec) {
+				continue;
+			}
+
+			MergeIndexes(existing_kv, kv_updates);
+
+			raw.SetOmapKv<PackedTimestamp>(
+			    index_path, existing_kv, [](const PackedTimestamp &tm) { return tm.Serialize(); }, ec);
+		}
+	}
+
+	void PullIndexFromCeph(const CephNamespace &ns) {
+		tsl::htrie_map<char, PackedTimestamp> pulled_index;
+
+		std::queue<fs::path> pull_queue;
+		pull_queue.emplace("/");
+		while (!pull_queue.empty()) {
+			auto next_to_pull = std::move(pull_queue.front());
+			pull_queue.pop();
+
+			auto index_oid = next_to_pull / CEPH_INDEX_FILE;
+
+			std::error_code ec;
+			auto index_omap_kv =
+			    raw.GetOmapKv<PackedTimestamp>(CephPath {ns, index_oid}, {}, &PackedTimestamp::Deserialize, ec);
+			if (ec) {
+				index_omap_kv = {};
+			}
+
+			if (index_omap_kv.empty()) {
+				auto object_names = ListObjectsDirect(CephPath {ns, next_to_pull.string()}, ec);
+				if (ec) {
+					continue;
+				}
+				PackedTimestamp query_time {GetTimeNs(), true};
+				for (auto &name : object_names) {
+					auto oid_path = next_to_pull / name;
+					pulled_index[oid_path.string()] = query_time;
+				}
+				continue;
+			}
+
+			for (auto &[component, tm] : index_omap_kv) {
+				auto next_level_path = next_to_pull / component;
+				if (raw.Exist(CephPath {ns, next_level_path.string()}, ec) && !ec) {
+					pulled_index[next_level_path.string()] = tm;
+					continue;
+				}
+				if (ec) {
+					continue;
+				}
+
+				pull_queue.push(std::move(next_level_path));
+			}
+		}
+
+		std::lock_guard lk {mu};
+		MergeIndexes(raw_file_meta[ns], pulled_index);
+	}
+
+	void LoadIndexFromLocalCache(const CephNamespace &ns) {
+		auto local_cache = GetLocalIndexCacheFilePath(ns, false);
+		if (!local_cache.has_value()) {
+			return;
+		}
+
+		auto local_cache_buffer = [&local_cache]() {
+			std::ifstream fin {local_cache.value()};
+			std::stringstream buf;
+			buf << fin.rdbuf();
+			return buf.str();
+		}();
+
+		IndexDeserializer deserializer {local_cache_buffer.c_str()};
+		auto tmp = tsl::htrie_map<char, PackedTimestamp>::deserialize(deserializer);
+		auto &target = raw_file_meta[ns];
+
+		std::lock_guard lk {mu};
+		std::string key_buffer;
+		for (auto it = tmp.begin(); it != tmp.end(); ++it) {
+			it.key(key_buffer);
+			auto mit = target.find(key_buffer);
+			if (mit == target.end() || mit.value().GetTimestamp() < it.value().GetTimestamp()) {
+				target[key_buffer] = it.value();
+			}
+		}
+	}
+
+	std::vector<std::string> ListObjectsDirect(const CephPath &prefix, std::error_code &ec) {
+		return raw.ListFilesAndTransform(
+		    prefix.ns,
+		    [](const std::string &oid, std::error_code &ec) -> std::optional<std::string> {
+			    constexpr std::size_t CEPH_OBJ_SUFFIX_LENGTH = std::size(CEPH_OBJ_SUFFIX) - 1;
+			    if (oid.size() < CEPH_OBJ_SUFFIX_LENGTH) {
+				    return std::nullopt;
+			    }
+
+			    const auto pos = oid.size() - CEPH_OBJ_SUFFIX_LENGTH;
+			    if (oid.find(CEPH_OBJ_SUFFIX, pos) != std::string::npos) {
+				    return oid.substr(0, pos);
+			    }
+
+			    return std::nullopt;
+		    },
+		    ec);
+	}
+};
+
+class CephConnector::FileMetaManager {
+public:
+	explicit FileMetaManager(RawCephConnector &raw) noexcept : raw {raw}, enable_cache {true}, cache {1 << 15} {
+	}
+
+	template <typename FN>
+	void GetFileMetaAndDo(const CephPath &path, FN callback, std::error_code &ec) {
+		static_assert(std::is_invocable_r_v<void, FN, FileMetaCache &, std::error_code &>);
+
+		if (enable_cache) {
+			auto cache_hit = cache.tryOperate(path, [&callback, &ec](FileMetaCache &c) {
+				if (c.HasExpired()) {
+					return false;
+				}
+				ec = std::error_code {};
+				callback(c, ec);
+				return true;
+			});
+			if (cache_hit) {
+				return;
+			}
+		}
+
+		auto stat = raw.Stat(path, ec);
+		if (ec) {
+			return;
+		}
+
+		FileMetaCache meta_cache {std::chrono::system_clock::now(), stat};
+		ec = std::error_code {};
+		callback(meta_cache, ec);
+
+		if (enable_cache) {
+			cache.insert(path, std::move(meta_cache));
+		}
+	}
+
+	void DeleteCacheOfFile(const CephPath &path) {
+		if (!enable_cache) {
+			return;
+		}
+		cache.remove(path);
+	}
+
+	void DisableCache() noexcept {
+		enable_cache = false;
+		cache.clear();
+	}
+
+	bool IsCacheEnabled() const noexcept {
+		return enable_cache;
+	}
+
+private:
+	RawCephConnector &raw;
+	bool enable_cache;
+	lru11::Cache<CephPath, FileMetaCache, std::mutex> cache;
+};
 
 CephConnector &CephConnector::GetSingleton() {
 	static CephConnector INSTANCE;
 
-	auto cur_pid = getpid();
-	// detecting fork
-	if (cur_pid != pid) {
-		INSTANCE.Initialize();
-		pid = cur_pid;
+	auto cur_pid = ::getpid();
+
+	// Detect fork.
+	if (cur_pid != current_pid) {
+		current_pid = cur_pid;
+
+		// After forking, re-initialize the global CephConnector object.
+		INSTANCE.~CephConnector();
+		new (&INSTANCE) CephConnector {};
 	}
 
 	return INSTANCE;
 }
 
-void CephConnector::Initialize() {
-	int err;
-	if (GetJdfsUsername().empty()) {
-		throw std::runtime_error("can not find JDFS_USERNAME in environment variable");
-	}
-	auto ceph_args = GetEnv("CEPH_ARGS");
-	if (!ceph_args.empty()) {
-		err = cluster.init2(GetJdfsUsername().data(), nullptr, 0);
-		if (err < 0) {
-			throw std::runtime_error(std::string("Couldn't init cluster ") + strerror(-err));
-		}
-		err = cluster.conf_parse_env("CEPH_ARGS");
-		if (err < 0) {
-			throw std::runtime_error(std::string("Couldn't parse config ") + strerror(-err));
-		}
-	} else {
-		std::string config_path = GetEnv("SYS_JDFS_CONFIG_PATH");
-		if (config_path.empty()) {
-			config_path = GetEnv("JDFS_CONFIG_PATH");
-		}
-		if (config_path.empty()) {
-			throw std::runtime_error("Environment Variable JDFS_CONFIG_PATH was not found!");
-		}
-		err = cluster.init2(GetJdfsUsername().data(), CLUSTER_NAME, 0);
-		if (err < 0) {
-			throw std::runtime_error(std::string("Couldn't init cluster ") + strerror(-err));
-		}
-		err = cluster.conf_read_file(config_path.c_str());
-		if (err < 0) {
-			throw std::runtime_error(std::string("Couldn't read conf file ") + strerror(-err));
-		}
-	}
-	err = cluster.connect();
-	if (err < 0) {
-		throw std::runtime_error(std::string("Couldn't connect to cluster ") + strerror(-err));
-	}
+CephConnector::CephConnector()
+    : raw {std::make_unique<RawCephConnector>()}, index_manager {std::make_unique<FileIndexManager>(*raw)},
+      meta_manager {std::make_unique<FileMetaManager>(*raw)} {
 }
 
-int CephConnector::InitMeta(const std::string &path, const std::string &pool, const std::string &ns,
-                            CephConnector::MetaCache *mc) {
-	auto combrs = std::make_shared<CombStriper>();
-	auto ret = this->GetCombStriper(pool, ns, &combrs);
-	if (ret < 0) {
-		mc->length = mc->last_modified = ret;
-		return ret;
-	}
-	uint64_t size = 0;
-	timespec tsp {};
-	combrs->rs->stat2(path, &size, &tsp);
-	if (size == 0) {
-		ceph::bufferlist bufferlist;
-		ret = combrs->io_ctx->getxattr(path + CEPH_OBJ_SUFFIX, "striper.layout.object_size", bufferlist);
-		if (ret < 0) {
-			size = ret;
-		}
-	}
-	mc->length = size;
-	mc->last_modified = tsp.tv_sec;
-	mc->cache_time = GetTimeMs();
-	return ret;
-}
+CephConnector::~CephConnector() noexcept = default;
 
 int64_t CephConnector::Size(const std::string &path, const std::string &pool, const std::string &ns, time_t *mtm) {
+	CephPath key {{pool, ns}, path};
+	std::error_code ec;
 
-	auto &&key = std::forward_as_tuple(path, pool, ns);
-	int64_t ret;
-	if (enable_cache && cache.tryOperate(key, [&ret, &mtm](MetaCache &mc) {
-		    if (mc.cache_time + VALID_DURATION < GetTimeMs()) {
-			    return false;
-		    }
+	std::size_t size = 0;
+	meta_manager->GetFileMetaAndDo(
+	    key,
+	    [mtm, &size](const FileMetaCache &c, std::error_code &) {
+		    size = c.stat.size;
 		    if (mtm) {
-			    *mtm = mc.last_modified;
+			    *mtm =
+			        std::chrono::duration_cast<std::chrono::seconds>(c.stat.last_modified.time_since_epoch()).count();
 		    }
-		    ret = mc.length;
-		    return true;
-	    })) {
-		return ret;
-	}
-	MetaCache cc;
-	InitMeta(path, pool, ns, &cc);
-	if (mtm) {
-		*mtm = cc.last_modified;
-	}
-	ret = cc.length;
-	if (enable_cache) {
-		cache.insert(key, std::move(cc));
+	    },
+	    ec);
+
+	if (ec) {
+		return -ec.value();
 	}
 
-	return ret;
+	return size;
 }
 
 bool CephConnector::Exist(const std::string &path, const std::string &pool, const std::string &ns) {
-	auto &&key = std::forward_as_tuple(path, pool, ns);
-	bool exist;
-	if (enable_cache && cache.tryOperate(key, [&exist](MetaCache &mc) {
-		    if (mc.cache_time + VALID_DURATION < GetTimeMs()) {
-			    return false;
-		    }
-		    exist = mc.length >= 0;
-		    return true;
-	    })) {
-		return exist;
-	}
-	MetaCache cc;
-	InitMeta(path, pool, ns, &cc);
-	exist = cc.length >= 0;
-	if (enable_cache) {
-		cache.insert(key, std::move(cc));
-	}
+	CephPath key {{pool, ns}, path};
+	std::error_code ec;
+
+	auto exist = false;
+	meta_manager->GetFileMetaAndDo(
+	    key, [&exist](const FileMetaCache &c, std::error_code &) { exist = c.stat.size > 0; }, ec);
+
 	return exist;
 }
 
-int64_t CephConnector::DoRead(const std::string &path, const std::string &pool, const std::string &ns,
-                              int64_t file_offset, char *buffer_out, int64_t buffer_out_len) {
-	auto combrs = std::make_shared<CombStriper>();
-	auto ret = GetCombStriper(pool, ns, &combrs);
-	CHECK_RETURN(ret < 0, ret);
-	int64_t has_read = 0;
-	// issue: https://stackoverflow.com/questions/70368651/why-cant-linux-write-more-than-2147479552-bytes
-	for (int64_t offset = 0; offset < buffer_out_len; offset += SPLIT_SIZE) {
-		ceph::bufferlist bl;
-		auto ret = combrs->rs->read(path, &bl, std::min(SPLIT_SIZE, buffer_out_len - offset), offset + file_offset);
-		CHECK_RETURN(ret <= 0, ret);
-		for (auto &buf : bl.buffers()) {
-			memcpy(buffer_out + has_read, buf.c_str(), buf.length());
-			has_read += buf.length();
-		}
-	}
-	return has_read;
-}
-
 int64_t CephConnector::Read(const std::string &path, const std::string &pool, const std::string &ns,
-                            int64_t file_offset, char *buffer_out, int64_t buffer_out_len) {
+                            std::uint64_t file_offset, char *buffer_out, std::size_t buffer_out_len) {
 	// return doRead(path, pool, ns, file_offset, buffer_out, buffer_out_len);
-	auto sz = Size(path, pool, ns);
-	CHECK_RETURN(sz <= 0, sz);
-	auto &&key = std::forward_as_tuple(path, pool, ns);
-	int64_t buffer_offset = 0;
+	auto raw_sz = Size(path, pool, ns);
+	CHECK_RETURN(raw_sz <= 0, raw_sz);
+
+	std::size_t sz = raw_sz;
+
+	CephPath key {{pool, ns}, path};
 	auto to_read = buffer_out_len;
-	if (enable_cache && cache.tryOperate(key, [&file_offset, &buffer_out_len, &buffer_out, &to_read](MetaCache &cc) {
-		    if (cc.cache_time + VALID_DURATION < GetTimeMs()) {
-			    return false;
-		    }
-		    if (cc.read_buffer && file_offset + buffer_out_len > cc.buffer_start) {
-			    auto can_read = std::min(file_offset + buffer_out_len - cc.buffer_start, buffer_out_len);
-			    auto buffer_offset = std::max(0L, file_offset - cc.buffer_start);
-			    std::memcpy(buffer_out + buffer_out_len - can_read, cc.read_buffer.get() + buffer_offset, can_read);
+
+	std::error_code ec;
+	meta_manager->GetFileMetaAndDo(
+	    key,
+	    [&file_offset, &buffer_out_len, &buffer_out, &to_read](const FileMetaCache &mc, std::error_code &ec) {
+		    if (mc.read_cache && file_offset + buffer_out_len > mc.read_cache_start_offset) {
+			    // The read cache is not empty and contains part of the data that we currently want. Try to read some
+			    // data from the read cache.
+
+			    // Note that the read cache in the FileMetaCache always contain data from the end of the file.
+			    auto can_read = std::min(file_offset + buffer_out_len - mc.read_cache_start_offset, buffer_out_len);
+			    auto buffer_offset =
+			        file_offset >= mc.read_cache_start_offset ? file_offset - mc.read_cache_start_offset : 0;
+			    std::memcpy(buffer_out + buffer_out_len - can_read, mc.read_cache.get() + buffer_offset, can_read);
 			    to_read -= can_read;
-			    return true;
 		    }
-		    return false;
-	    })) {
-		if (to_read == 0) {
-			return buffer_out_len;
-		}
+	    },
+	    ec);
+	if (ec) {
+		return -ec.value();
 	}
-	// special optimize for parquet or very small files(usually some meta files)
-	if (enable_cache && (sz <= MetaCache::READ_BUFFER_LEN || (buffer_out_len == 8 && file_offset + 8 == sz))) {
-		auto can_read = std::min(MetaCache::READ_BUFFER_LEN, sz);
-		auto tmp = std::make_unique<char[]>(can_read);
+	if (to_read == 0) {
+		return buffer_out_len;
+	}
+
+	// Special optimization for parquet or very small files (usually some meta files).
+	if (meta_manager->IsCacheEnabled() &&
+	    (sz <= FileMetaCache::READ_CACHE_LEN || (buffer_out_len == 8 && file_offset + 8 == sz))) {
+		auto can_read = std::min<std::size_t>(FileMetaCache::READ_CACHE_LEN, sz);
+		std::unique_ptr<char[]> cache {new char[can_read]};
 		auto can_read_offset = sz - can_read;
-		auto ret = DoRead(path, pool, ns, can_read_offset, tmp.get(), can_read);
-		CHECK_RETURN(ret < 0, ret);
-		std::memcpy(buffer_out, tmp.get() + can_read - buffer_out_len, buffer_out_len);
-		cache.tryOperate(key, [&tmp, &can_read_offset](MetaCache &cc) {
-			cc.buffer_start = can_read_offset;
-			cc.read_buffer = std::move(tmp);
-			return true;
-		});
-	} else {
-		auto ret = DoRead(path, pool, ns, file_offset, buffer_out + buffer_offset, to_read);
-		CHECK_RETURN(ret < 0, ret);
+
+		raw->Read(key, can_read_offset, cache.get(), can_read, ec);
+		if (ec) {
+			return -ec.value();
+		}
+
+		std::memcpy(buffer_out, cache.get() + can_read - buffer_out_len, buffer_out_len);
+
+		meta_manager->GetFileMetaAndDo(
+		    key,
+		    [&cache, &can_read_offset](FileMetaCache &c, std::error_code &) {
+			    c.read_cache = std::move(cache);
+			    c.read_cache_start_offset = can_read_offset;
+		    },
+		    ec);
+		if (ec) {
+			return -ec.value();
+		}
+
+		return buffer_out_len;
 	}
-	return buffer_out_len;
+
+	auto ret = raw->Read(key, file_offset, buffer_out, to_read, ec);
+	if (ec) {
+		return -ec.value();
+	}
+
+	return ret;
 }
 
 int64_t CephConnector::Write(const std::string &path, const std::string &pool, const std::string &ns, char *buffer_in,
-                             int64_t buffer_in_len, bool update) {
-	CHECK_RETURN(Exist(path, pool, ns) && !Delete(path, pool, ns, false), -1);
-	auto combrs = std::make_shared<CombStriper>();
-	auto ret = GetCombStriper(pool, ns, &combrs);
-	CHECK_RETURN(ret < 0, ret);
-	std::vector<std::unique_ptr<librados::AioCompletion>> completions;
-	int64_t transmited = 0;
-	for (; transmited < buffer_in_len; transmited += SPLIT_SIZE) // create write ops
-	{
-		const auto transfer_size = std::min(SPLIT_SIZE, buffer_in_len - transmited);
-		auto bl = ceph::bufferlist::static_from_mem(const_cast<char *>(buffer_in) + transmited, transfer_size);
-		completions.emplace_back(librados::Rados::aio_create_completion());
-		auto ret = combrs->rs->aio_write(path, completions.back().get(), bl, transfer_size, transmited);
-		CHECK_RETURN(ret < 0, ret);
-	}
-	// wait for all job complete
-	for (auto &complete : completions) {
-		int ret = 0;
-		if (!complete->is_complete()) {
-			ret = complete->wait_for_complete();
-		}
-		CHECK_RETURN(ret != 0, ret);
-		ret = complete->get_return_value();
-		CHECK_RETURN(ret != 0, ret);
-	}
-	{
-		// set obj size, to make compatiable with jdfs;
-		ceph::bufferlist bl;
-		bl.append("0.1");
-		int ret = combrs->rs->setxattr(path, "_version", bl);
-		CHECK_RETURN(ret != 0, ret);
-		bl.clear();
-		bl.append(std::to_string(buffer_in_len));
-		ret = combrs->rs->setxattr(path, "_size", bl);
-		CHECK_RETURN(ret != 0, ret);
+                             std::size_t buffer_in_len) {
+	CephPath key {{pool, ns}, path};
+
+	std::error_code ec;
+	raw->Write(key, buffer_in, buffer_in_len, ec);
+	if (ec) {
+		return -ec.value();
 	}
 
-	// update file meta
-	if (update) {
+	// Update file index and meta.
+	index_manager->InsertOrUpdate(key);
+	if (meta_manager->IsCacheEnabled()) {
+		meta_manager->GetFileMetaAndDo(
+		    key,
+		    [&buffer_in_len](FileMetaCache &c, std::error_code &) {
+			    auto now = std::chrono::system_clock::now();
+			    c.cache_time = now;
+			    c.stat.size = buffer_in_len;
+			    c.stat.last_modified = now;
+		    },
+		    ec);
+		if (ec) {
+			return -ec.value();
+		}
+	}
 
-		auto key = std::make_pair(pool, ns);
-		auto tm = (GetTimeNs() << 1) | 1;
-		boost::interprocess::message_queue mq(boost::interprocess::open_or_create, GetJdfsUsername().data(),
-		                                      CEPH_INDEX_MQ_SIZE, sizeof(Elem));
-		if (mq.get_num_msg() > MQ_SIZE_THRESHOLD) {
-			PersistChangeInMessageQueueToCeph(&mq);
-		}
-		auto elem = Conv2Elem(path, pool, ns, tm);
-		mq.send(&elem, sizeof(elem), 0);
-		{
-			std::unique_lock<std::mutex> lk(mtx);
-			increment_file_meta[key][path] = tm;
-		}
-	}
-	if (enable_cache) {
-		auto &&key = std::forward_as_tuple(path, pool, ns);
-		cache.tryOperate(key, [&buffer_in_len](MetaCache &cc) {
-			cc.length = cc.buffer_start = buffer_in_len;
-			cc.last_modified = cc.cache_time = GetTimeMs();
-			return true;
-		});
-	}
 	return buffer_in_len;
 }
 
-bool CephConnector::Delete(const std::string &path, const std::string &pool, const std::string &ns, bool update) {
-	auto combrs = std::make_shared<CombStriper>();
-	auto ret = GetCombStriper(pool, ns, &combrs);
-	CHECK_RETURN(ret < 0, ret);
-	combrs->rs->rmxattr(path, "_version");
-	combrs->rs->rmxattr(path, "_size");
-	ret = combrs->rs->remove(path);
-	if (ret != 0) {
-		// try force_delete
-		ret = combrs->io_ctx->remove(path);
-		ret = combrs->io_ctx->remove(path + CEPH_OBJ_SUFFIX) & ret;
-		CHECK_RETURN(ret != 0, false);
+bool CephConnector::Delete(const std::string &path, const std::string &pool, const std::string &ns) {
+	CephPath key {{pool, ns}, path};
+	std::error_code ec;
+
+	raw->Delete(key, ec);
+	if (ec) {
+		return false;
 	}
-	// update file meta
-	if (update) {
-		auto key = std::make_pair(pool, ns);
-		auto tm = GetTimeNs() << 1;
-		boost::interprocess::message_queue mq(boost::interprocess::open_or_create, GetJdfsUsername().data(),
-		                                      CEPH_INDEX_MQ_SIZE, sizeof(Elem));
-		if (mq.get_num_msg() > MQ_SIZE_THRESHOLD) {
-			PersistChangeInMessageQueueToCeph(&mq);
-		}
-		auto elem = Conv2Elem(path, pool, ns, tm);
-		mq.send(&elem, sizeof(elem), 0);
-		{
-			std::unique_lock<std::mutex> lk(mtx);
-			increment_file_meta[key][path] = tm;
-		}
-		auto &&hash_key = std::forward_as_tuple(path, pool, ns);
-		if (enable_cache) {
-			cache.remove(hash_key);
-		}
-	}
+
+	// Update file index and file meta.
+	index_manager->Delete(key);
+	meta_manager->DeleteCacheOfFile(key);
+
 	return true;
 }
 
 std::vector<std::string> CephConnector::ListFiles(const std::string &path, const std::string &pool,
                                                   const std::string &ns) {
-	std::unordered_map<std::string, int64_t> ret;
-	auto key = std::make_pair(pool, ns);
-	std::string objname;
-	bool raw_empty;
-
-	{
-		std::unique_lock<std::mutex> lk(mtx);
-		auto prefix_range = increment_file_meta[key].equal_prefix_range(path);
-		for (auto it = prefix_range.first; it != prefix_range.second; it++) {
-			it.key(objname);
-			ret[objname] = it.value();
-		}
-		raw_empty = raw_file_meta[key].empty();
-	}
-
-	{
-		if (raw_empty) {
-			auto local_cache = GetLocalCache(pool, ns, false);
-			if (!Exist(CEPH_INDEX_FILE, pool, ns) && !fs::exists(local_cache)) {
-				RefreshFileMeta(pool, ns);
-			} else {
-				auto process = [&](const string &buf) {
-					tsl::deserializer dserial(buf.c_str());
-					auto tmp = tsl::htrie_map<char, std::uint64_t>::deserialize(dserial);
-					std::string key_buffer;
-					auto &&target = raw_file_meta[key];
-					std::unique_lock<std::mutex> lk(mtx);
-					for (auto it = tmp.begin(); it != tmp.end(); ++it) {
-						it.key(key_buffer);
-						auto mit = target.find(key_buffer);
-						if (mit == target.end() || mit.value() < it.value()) {
-							target[key_buffer] = it.value();
-						}
-					}
-				};
-				// read from common meta first
-				if (Exist(CEPH_INDEX_FILE, pool, ns)) {
-					auto sz = Size(CEPH_INDEX_FILE, pool, ns);
-					if (sz > 0) {
-						std::string buf;
-						buf.resize(sz);
-						Read(CEPH_INDEX_FILE, pool, ns, 0, buf.data(), sz);
-						process(buf);
-					}
-				}
-				// try to read from local
-				if (fs::exists(local_cache)) {
-					std::ifstream fin(local_cache);
-					std::stringstream buf;
-					buf << fin.rdbuf();
-					auto &&sbuf = buf.str();
-					if (!sbuf.empty()) {
-						process(sbuf);
-					}
-				}
-			}
-		}
-	}
-
-	{
-		std::unique_lock<std::mutex> lk(mtx);
-		auto prefix_range = raw_file_meta[key].equal_prefix_range(path);
-		for (auto it = prefix_range.first; it != prefix_range.second; it++) {
-			it.key(objname);
-			auto eit = ret.find(objname);
-			if (eit == ret.end() || eit->second < it.value()) {
-				ret[objname] = it.value();
-			}
-		}
-	}
-	std::vector<std::string> obj_list;
-	for (auto &[k, v] : ret) {
-		if (v & 1) {
-			obj_list.push_back(k);
-		}
-	}
-	return obj_list;
+	CephPath prefix {{pool, ns}, path};
+	return index_manager->ListFiles(prefix);
 }
 
-void CephConnector::RefreshFileMeta(const std::string &pool, const std::string &ns) {
-	auto combrs = std::make_shared<CombStriper>();
-	auto err = GetCombStriper(pool, ns, &combrs);
-	CHECK_RETURN(err < 0, void());
-
-	std::vector<std::string> ret;
-	std::vector<time_t> query_times;
-	for (auto it = combrs->io_ctx->nobjects_begin(); it != combrs->io_ctx->nobjects_end(); it++) {
-		if (it->get_nspace() != ns) {
-			continue;
-		}
-		auto &&oid = it->get_oid();
-		const auto pos = oid.size() - CEPH_OBJ_SUFFIX.size();
-		if (oid.find(CEPH_OBJ_SUFFIX, pos) != std::string::npos) {
-			ret.emplace_back(oid.substr(0, pos));
-			query_times.push_back(GetTimeNs());
-		}
-	}
-	// update raw_meta
-	{
-		auto key = std::make_pair(pool, ns);
-		std::string buf;
-		{
-			std::unique_lock<std::mutex> lk(mtx);
-			raw_file_meta[key].clear();
-			for (size_t i = 0; i < ret.size(); i++) {
-				auto tm = (query_times[i] << 1) | 1;
-				raw_file_meta[key][ret[i]] = tm;
-			}
-
-			tsl::serializer serial(buf);
-			raw_file_meta[key].shrink_to_fit();
-			raw_file_meta[key].serialize(serial);
-		}
-		auto ret = Write(CEPH_INDEX_FILE, pool, ns, buf.data(), buf.size(), false);
-		if (ret < 0) {
-			auto local_cache = GetLocalCache(pool, ns, true);
-			if (!local_cache.empty()) {
-				std::ofstream fout(local_cache);
-				fout << buf;
-			}
-		}
-	}
+void CephConnector::RefreshFileIndex(const std::string &pool, const std::string &ns) {
+	CephNamespace key {pool, ns};
+	index_manager->Refresh(key);
 }
 
-void CephConnector::PersistChangeInMessageQueueToCeph(boost::interprocess::message_queue *mq_ptr) {
-	auto &&mq = *mq_ptr;
-	if (mq.get_num_msg() == 0) {
-		return;
-	}
-	Elem elem;
-	size_t recv_size;
-	unsigned int pq;
-	std::map<std::pair<std::string, std::string>, tsl::htrie_map<char, std::uint64_t>> mp;
-	while (mq.try_receive(&elem, sizeof(elem), recv_size, pq)) {
-		auto url = std::string_view(elem.path.data(), elem.sz);
-		std::string path, pool, ns;
-		ParseUrl(url, pool, ns, path);
-		if (path == CEPH_INDEX_FILE) {
-			continue;
-		}
-		auto key = std::make_pair(pool, ns);
-		auto it = mp[key].find(path);
-		if (it == mp[key].end() || it.value() < elem.tm) {
-			mp[key][path] = elem.tm;
-		}
-	}
-	boost::interprocess::message_queue::remove(GetJdfsUsername().data());
-	for (auto &[key, v] : mp) {
-		auto &&[pool, ns] = key;
-		tsl::htrie_map<char, std::uint64_t> map_deserialized;
-		if (Exist(CEPH_INDEX_FILE, pool, ns)) {
-			auto sz = Size(CEPH_INDEX_FILE, pool, ns);
-			// if size of the index file more than 1GB, then it's considered as broken.
-			if (sz >= (1 << 30)) {
-				Delete(CEPH_INDEX_FILE, pool, ns, false);
-				continue;
-			}
-			if (sz > 0) {
-				std::string buf;
-				buf.resize(sz);
-				Read(CEPH_INDEX_FILE, pool, ns, 0, buf.data(), sz);
-				tsl::deserializer dserial(buf.c_str());
-				try {
-					map_deserialized = tsl::htrie_map<char, std::uint64_t>::deserialize(dserial);
-				} catch (...) {
-					// index file broken, then remove directly.
-					Delete(CEPH_INDEX_FILE, pool, ns, false);
-					continue;
-				}
-			}
-		}
-		std::string key_buffer;
-		for (auto it = v.begin(); it != v.end(); ++it) {
-			it.key(key_buffer);
-			auto mit = map_deserialized.find(key_buffer);
-			if (mit == map_deserialized.end() || mit.value() < it.value()) {
-				map_deserialized[key_buffer] = it.value();
-			}
-		}
-		// call this funtion to avoid file size expansion.
-		std::string buf;
-		tsl::serializer serial(buf);
-		map_deserialized.shrink_to_fit();
-		map_deserialized.serialize(serial);
-		Write(CEPH_INDEX_FILE, pool, ns, const_cast<char *>(buf.c_str()), buf.size(), false);
-	}
+void CephConnector::PersistChangeInMessageQueueToCeph() {
+	index_manager->PersistChangeInMqToCeph();
 }
 
-int CephConnector::GetCombStriper(const std::string &pool, const std::string &ns,
-                                  std::shared_ptr<CephConnector::CombStriper> *cs) {
-	auto io_ctx = std::shared_ptr<librados::IoCtx>(new librados::IoCtx(), [](auto &&io_ctx) {
-		if (io_ctx->is_valid()) {
-			io_ctx->close();
-		}
-		delete io_ctx;
-	});
-	auto ret = cluster.ioctx_create(pool.c_str(), *io_ctx);
-	CHECK_RETURN(ret < 0, ret);
-	uint64_t alignment;
-	ret = io_ctx->pool_required_alignment2(&alignment);
-	CHECK_RETURN(ret < 0, ret);
-	io_ctx->set_namespace(ns);
-	(*cs)->rs = std::make_shared<libradosstriper::RadosStriper>();
-	ret = libradosstriper::RadosStriper::striper_create(*io_ctx, (*cs)->rs.get());
-	CHECK_RETURN(ret < 0, ret);
-	(*cs)->io_ctx = std::move(io_ctx);
-	return 0;
+void CephConnector::DisableCache() {
+	meta_manager->DisableCache();
 }
+
 } // namespace duckdb

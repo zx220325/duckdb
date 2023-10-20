@@ -243,21 +243,18 @@ bool CephFileSystem::ListFiles(const string &directory, const std::function<void
 		if (GetJdfsUsername().empty()) {
 			return true;
 		}
-		boost::interprocess::message_queue mq(boost::interprocess::open_or_create, GetJdfsUsername().data(),
-		                                      CEPH_INDEX_MQ_SIZE, sizeof(Elem));
-		if (mq.get_num_msg() > 0) {
-			CephConnector::GetSingleton().PersistChangeInMessageQueueToCeph(&mq);
-		} else {
-			boost::interprocess::message_queue::remove(GetJdfsUsername().data());
-		}
+
+		CephConnector::GetSingleton().PersistChangeInMessageQueueToCeph();
+
 		return true;
 	}
+
 	auto &&cs = CephConnector::GetSingleton();
 	string path, pool, ns;
 	ParseUrl(directory, pool, ns, path);
 
 	if (path == "refresh_index") {
-		cs.RefreshFileMeta(pool, ns);
+		cs.RefreshFileIndex(pool, ns);
 		return true;
 	}
 	for (auto &object : cs.ListFiles(path, pool, ns)) {
