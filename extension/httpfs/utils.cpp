@@ -1,15 +1,24 @@
 #include "utils.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
+#include <string>
 #include <sys/time.h>
+#include <utility>
 
-namespace duckdb
-{
+namespace duckdb {
 
-typename UtcClock::time_point UtcClock::now() noexcept {  // NOLINT
+namespace {
+
+constexpr char PATH_SEPARATOR = '/';
+
+} // namespace
+
+typename UtcClock::time_point UtcClock::now() noexcept { // NOLINT
 	::timeval tm;
 	if (::gettimeofday(&tm, nullptr) != 0) {
 		std::cerr << "::gettimeofday failed" << std::endl;
@@ -19,6 +28,91 @@ typename UtcClock::time_point UtcClock::now() noexcept {  // NOLINT
 	std::uint64_t count = static_cast<std::uint64_t>(tm.tv_sec) + static_cast<std::uint64_t>(tm.tv_usec) * 1'000'000;
 	duration dur {count};
 	return time_point {dur};
+}
+
+Path::Path(const char *raw) noexcept : components {} {
+	std::string current_component;
+	for (auto raw_ptr = raw; *raw_ptr; ++raw_ptr) {
+		auto ch = *raw_ptr;
+		if (ch == PATH_SEPARATOR) {
+			if (!current_component.empty()) {
+				components.push_back(std::move(current_component));
+				current_component.clear();
+			}
+		} else {
+			current_component.push_back(ch);
+		}
+	}
+
+	if (!current_component.empty()) {
+		components.push_back(std::move(current_component));
+	}
+}
+
+Path::Path(const std::string &raw) noexcept : Path {raw.c_str()} {
+}
+
+std::string Path::GetFileName() const noexcept {
+	if (components.empty()) {
+		return "";
+	} else {
+		return components.back();
+	}
+}
+
+Path Path::GetBase() const noexcept {
+	if (IsRoot()) {
+		return Path {};
+	}
+
+	Path ret;
+	ret.components.resize(components.size() - 1);
+	std::copy(components.begin(), components.end() - 1, ret.components.begin());
+
+	return ret;
+}
+
+void Path::Push(const std::string &component) noexcept {
+	components.push_back(component);
+}
+
+void Path::Push(const char *component) noexcept {
+	components.emplace_back(component);
+}
+
+void Path::Pop() noexcept {
+	components.pop_back();
+}
+
+std::string Path::ToString() const noexcept {
+	std::ostringstream builder;
+	for (const auto &c : components) {
+		builder << PATH_SEPARATOR << c;
+	}
+	return builder.str();
+}
+
+Path::Path() noexcept : components {} {
+}
+
+bool operator==(const Path &lhs, const Path &rhs) noexcept {
+	return lhs.components == rhs.components;
+}
+
+bool operator!=(const Path &lhs, const Path &rhs) noexcept {
+	return lhs.components != rhs.components;
+}
+
+Path operator/(const Path &lhs, const char *component) noexcept {
+	Path ret = lhs;
+	ret.Push(component);
+	return ret;
+}
+
+Path operator/(const Path &lhs, const std::string &component) noexcept {
+	Path ret = lhs;
+	ret.Push(component);
+	return ret;
 }
 
 std::string GetEnv(const std::string &env) noexcept {

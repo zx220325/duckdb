@@ -5,6 +5,7 @@
 #include <ratio>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace duckdb {
 
@@ -17,6 +18,36 @@ struct UtcClock {
     constexpr static bool is_steady = true;  // NOLINT
 
     static time_point now() noexcept;  // NOLINT
+};
+
+class Path {
+public:
+    explicit Path(const char *raw) noexcept;
+    explicit Path(const std::string &raw) noexcept;
+
+    bool IsRoot() const noexcept { return components.empty(); }
+
+    std::string GetFileName() const noexcept;
+
+    Path GetBase() const noexcept;
+
+    void Push(const std::string &component) noexcept;
+    void Push(const char *component) noexcept;
+
+    void Pop() noexcept;
+
+    std::string ToString() const noexcept;
+
+    friend bool operator==(const Path &lhs, const Path &rhs) noexcept;
+    friend bool operator!=(const Path &lhs, const Path &rhs) noexcept;
+
+    friend Path operator/(const Path &lhs, const char *component) noexcept;
+    friend Path operator/(const Path &lhs, const std::string &component) noexcept;
+
+private:
+    Path() noexcept;
+
+    std::vector<std::string> components;
 };
 
 std::string GetEnv(const std::string &env) noexcept;

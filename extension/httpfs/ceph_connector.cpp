@@ -10,7 +10,6 @@
 #include <chrono>
 #include <cstddef>
 #include <cstring>
-#include <experimental/filesystem>
 #include <fstream>
 #include <functional>
 #include <iostream>
@@ -31,8 +30,6 @@
 #include <unistd.h>
 #include <unordered_map>
 #include <utility>
-
-namespace fs = std::experimental::filesystem;
 
 #define CHECK_RETURN(expr, value)                                                                                      \
 	do {                                                                                                               \
@@ -67,28 +64,6 @@ struct FileMetaCache {
 		auto dur = std::chrono::system_clock::now() - cache_time;
 		return dur.count() < 0 || dur > CACHE_VALID_DURATION;
 	}
-};
-
-class IndexDeserializer {
-public:
-	explicit IndexDeserializer(const char *input) noexcept : input {input} {
-	}
-
-	template <typename T, typename std::enable_if_t<std::is_trivially_copyable_v<T>> * = nullptr>
-	T operator()() noexcept {
-		T value;
-		std::memcpy(reinterpret_cast<char *>(&value), input, sizeof(T));
-		input += sizeof(T);
-		return value;
-	}
-
-	void operator()(char *value_out, std::size_t value_size) noexcept {
-		std::memcpy(value_out, input, value_size);
-		input += value_size;
-	}
-
-private:
-	const char *input;
 };
 
 std::optional<std::chrono::time_point<UtcClock>> DeserializeUtcTimePoint(const librados::bufferlist &buffer) noexcept {
@@ -133,10 +108,10 @@ public:
 		std::map<CephPath, std::map<std::string, std::chrono::time_point<UtcClock>>, std::greater<CephPath>> updates;
 
 		for (const auto &p : paths) {
-			fs::path oid_path {p.path};
-			auto object_name = oid_path.filename().string();
-			auto object_dir = oid_path.parent_path();
-			CephPath dir_path {p.ns, object_dir.string()};
+			Path oid_path {p.path};
+			auto object_name = oid_path.GetFileName();
+			auto object_dir = oid_path.GetBase();
+			CephPath dir_path {p.ns, object_dir.ToString()};
 
 			updates[dir_path].emplace(std::move(object_name), query_time);
 		}
@@ -146,10 +121,10 @@ public:
 			auto update_entry = std::move(*updates.begin());
 			updates.erase(updates.begin());
 
-			fs::path index_oid {update_entry.first.path};
-			index_oid /= CEPH_INDEX_FILE;
+			Path index_oid {update_entry.first.path};
+			index_oid.Push(CEPH_INDEX_FILE);
 
-			CephPath index_path {update_entry.first.ns, index_oid.string()};
+			CephPath index_path {update_entry.first.ns, index_oid.ToString()};
 			auto recurse_parent = [this, &update_entry, &index_path]() {
 				auto ret = false;
 				std::error_code ec {};
@@ -170,9 +145,9 @@ public:
 				continue;
 			}
 
-			fs::path dir_path {update_entry.first.path};
-			auto parent_dir = dir_path.parent_path().string();
-			auto dir_name = dir_path.filename().string();
+			Path dir_path {update_entry.first.path};
+			auto parent_dir = dir_path.GetBase().ToString();
+			auto dir_name = dir_path.GetFileName();
 
 			CephPath parent_dir_path {update_entry.first.ns, parent_dir};
 			updates[parent_dir_path].emplace(std::move(dir_name), query_time);
@@ -180,14 +155,14 @@ public:
 	}
 
 	void Delete(const CephPath &path) {
-		fs::path oid_path {path.path};
-		fs::path root = "/";
-		for (; oid_path != root; oid_path = oid_path.parent_path()) {
-			auto object_name = oid_path.filename().string();
+		Path oid_path {path.path};
+		Path root {"/"};
+		for (; oid_path != root; oid_path.Pop()) {
+			auto object_name = oid_path.GetFileName();
 
-			auto index_oid = oid_path.parent_path();
-			index_oid /= CEPH_INDEX_FILE;
-			CephPath index_path {path.ns, index_oid.string()};
+			auto index_oid = oid_path.GetBase();
+			index_oid.Push(CEPH_INDEX_FILE);
+			CephPath index_path {path.ns, index_oid.ToString()};
 
 			std::error_code ec {};
 			if (!raw.RadosExist(index_path, ec) || ec) {
@@ -209,7 +184,7 @@ public:
 	std::vector<std::string> ListFiles(const CephPath &prefix) {
 		std::vector<std::string> files;
 
-		std::queue<fs::path> pull_queue;
+		std::queue<Path> pull_queue;
 		pull_queue.emplace("/");
 		while (!pull_queue.empty()) {
 			auto next_to_pull = std::move(pull_queue.front());
@@ -218,28 +193,28 @@ public:
 			auto index_oid = next_to_pull / CEPH_INDEX_FILE;
 
 			std::error_code ec;
-			auto index_omap_kv = raw.GetOmapKv<std::chrono::time_point<UtcClock>>(CephPath {prefix.ns, index_oid}, {},
-			                                                                      &DeserializeUtcTimePoint, ec);
+			auto index_omap_kv = raw.GetOmapKv<std::chrono::time_point<UtcClock>>(
+			    CephPath {prefix.ns, index_oid.ToString()}, {}, &DeserializeUtcTimePoint, ec);
 			if (ec) {
 				index_omap_kv = {};
 			}
 
 			if (index_omap_kv.empty()) {
-				auto object_names = ListObjectsDirect(CephPath {prefix.ns, next_to_pull.string()}, ec);
+				auto object_names = ListObjectsDirect(CephPath {prefix.ns, next_to_pull.ToString()}, ec);
 				if (ec) {
 					continue;
 				}
 				for (auto &name : object_names) {
 					auto oid_path = next_to_pull / name;
-					files.push_back(oid_path.string());
+					files.push_back(oid_path.ToString());
 				}
 				continue;
 			}
 
 			for (auto &[component, tm] : index_omap_kv) {
 				auto next_level_path = next_to_pull / component;
-				if (raw.Exist(CephPath {prefix.ns, next_level_path.string()}, ec) && !ec) {
-					files.push_back(next_level_path.string());
+				if (raw.Exist(CephPath {prefix.ns, next_level_path.ToString()}, ec) && !ec) {
+					files.push_back(next_level_path.ToString());
 					continue;
 				}
 				if (ec) {
