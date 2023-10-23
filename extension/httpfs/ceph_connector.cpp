@@ -98,11 +98,11 @@ public:
 	explicit FileIndexManager(RawCephConnector &raw) noexcept : raw {raw} {
 	}
 
-	void InsertOrUpdate(const CephPath &path) {
-		InsertOrUpdate(std::vector<CephPath> {path});
+	void InsertOrUpdate(const CephPath &path, std::error_code &ec) {
+		InsertOrUpdate(std::vector<CephPath> {path}, ec);
 	}
 
-	void InsertOrUpdate(const std::vector<CephPath> &paths) {
+	void InsertOrUpdate(const std::vector<CephPath> &paths, std::error_code &ec) {
 		// Collect updates for each object directory.
 		auto query_time = UtcClock::now();
 		std::map<CephPath, std::map<std::string, std::chrono::time_point<UtcClock>>, std::greater<CephPath>> updates;
@@ -125,22 +125,28 @@ public:
 			index_oid.Push(CEPH_INDEX_FILE);
 
 			CephPath index_path {update_entry.first.ns, index_oid.ToString()};
-			auto recurse_parent = [this, &update_entry, &index_path]() {
+			auto recurse_parent = [this, &ec, &update_entry, &index_path]() {
 				auto ret = false;
-				std::error_code ec {};
 				if (!raw.RadosExist(index_path, ec) && !ec) {
 					raw.RadosCreate(index_path, ec);
 					ret = true;
 				}
-				if (!ec) {
-					raw.SetOmapKv<std::chrono::time_point<UtcClock>>(index_path, update_entry.second,
-					                                                 &SerializeUtcTimePoint, ec);
-					if (ec) {
-						ret = false;
-					}
+				if (ec) {
+					return false;
 				}
+
+				raw.SetOmapKv<std::chrono::time_point<UtcClock>>(index_path, update_entry.second,
+				                                                 &SerializeUtcTimePoint, ec);
+				if (ec) {
+					return false;
+				}
+
 				return ret;
 			}();
+			if (ec) {
+				return;
+			}
+
 			if (!recurse_parent || update_entry.first.path == "/") {
 				continue;
 			}
@@ -228,8 +234,30 @@ public:
 		return files;
 	}
 
-	void Refresh(const CephNamespace &ns) {
-		std::error_code ec;
+	std::chrono::time_point<UtcClock> QueryFileModifiedTime(const CephPath &path, std::error_code &ec) noexcept {
+		Path oid_path {path.path};
+		auto object_name = oid_path.GetFileName();
+		auto index_path = oid_path.GetBase();
+		index_path.Push(CEPH_INDEX_FILE);
+
+		std::set<std::string> keys {object_name};
+		auto index_kv = raw.GetOmapKv<std::chrono::time_point<UtcClock>>(CephPath {path.ns, index_path.ToString()},
+		                                                                 keys, &DeserializeUtcTimePoint, ec);
+		if (ec) {
+			return {};
+		}
+
+		auto it = index_kv.find(object_name);
+		if (it == index_kv.end()) {
+			ec = std::error_code {ENOENT, std::system_category()};
+			return {};
+		}
+
+		ec = std::error_code {};
+		return it->second;
+	}
+
+	void Refresh(const CephNamespace &ns, std::error_code &ec) {
 		auto object_names = ListObjectsDirect(CephPath {ns, ""}, ec);
 		if (ec) {
 			return;
@@ -241,7 +269,7 @@ public:
 			object_paths.push_back(CephPath {ns, std::move(name)});
 		}
 
-		InsertOrUpdate(object_paths);
+		InsertOrUpdate(object_paths, ec);
 	}
 
 private:
@@ -466,7 +494,11 @@ int64_t CephConnector::Write(const std::string &path, const std::string &pool, c
 	}
 
 	// Update file index and meta.
-	index_manager->InsertOrUpdate(key);
+	index_manager->InsertOrUpdate(key, ec);
+	if (ec) {
+		return -ec.value();
+	}
+
 	if (meta_manager->IsCacheEnabled()) {
 		meta_manager->GetFileMetaAndDo(
 		    key,
@@ -507,9 +539,24 @@ std::vector<std::string> CephConnector::ListFiles(const std::string &path, const
 	return index_manager->ListFiles(prefix);
 }
 
+std::time_t CephConnector::GetLastModifiedTime(const std::string &path, const std::string &pool,
+                                               const std::string &ns) {
+	CephPath object_path {{pool, ns}, path};
+	std::error_code ec {};
+
+	auto modified_time = index_manager->QueryFileModifiedTime(object_path, ec);
+	if (ec) {
+		return -ec.value();
+	}
+
+	return std::chrono::duration_cast<std::chrono::seconds>(modified_time.time_since_epoch()).count();
+}
+
 void CephConnector::RefreshFileIndex(const std::string &pool, const std::string &ns) {
 	CephNamespace key {pool, ns};
-	index_manager->Refresh(key);
+
+	std::error_code ec;
+	index_manager->Refresh(key, ec);
 }
 
 void CephConnector::DisableCache() {

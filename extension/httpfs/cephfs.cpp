@@ -12,6 +12,7 @@
 #include "utils.hpp"
 
 #include <chrono>
+#include <ctime>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -31,8 +32,10 @@ void CephFileHandle::Initialize(FileOpener *opener) {
 	// Initialize the read buffer now that we know the file exists
 	ParseUrl(path, pool, ns, obj_name);
 	auto &&cs = CephConnector::GetSingleton();
-	// auto &&cs = ((CephFileSystem &)file_system).cs;
+
+	std::time_t last_modified;
 	length = cs.Size(obj_name, pool, ns, &last_modified);
+
 	// as we cache small files in ceph connector
 	if (flags & FileFlags::FILE_FLAGS_READ) {
 		read_buffer = duckdb::unique_ptr<data_t[]>(new data_t[READ_BUFFER_LEN]);
@@ -193,8 +196,13 @@ int64_t CephFileSystem::GetFileSize(FileHandle &handle) {
 }
 
 time_t CephFileSystem::GetLastModifiedTime(FileHandle &handle) {
-	auto &sfh = static_cast<CephFileHandle &>(handle);
-	return sfh.last_modified;
+	auto &cfh = static_cast<CephFileHandle &>(handle);
+
+	std::string path, pool, ns;
+	ParseUrl(cfh.path, pool, ns, path);
+
+	auto &cs = CephConnector::GetSingleton();
+	return cs.GetLastModifiedTime(path, pool, ns);
 }
 
 bool CephFileSystem::FileExists(const string &filename) {

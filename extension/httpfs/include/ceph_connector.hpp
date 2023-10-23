@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstddef>
+#include <ctime>
 #include <memory>
 #include <string>
 #include <vector>
@@ -31,6 +32,8 @@ public:
 	bool Delete(const std::string &path, const std::string &pool, const std::string &ns);
 
 	std::vector<std::string> ListFiles(const std::string &pathprefix, const std::string &pool, const std::string &ns);
+
+	std::time_t GetLastModifiedTime(const std::string &path, const std::string &pool, const std::string &ns);
 
 	void RefreshFileIndex(const std::string &pool, const std::string &ns);
 

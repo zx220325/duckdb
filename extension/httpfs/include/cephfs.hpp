@@ -14,7 +14,6 @@ public:
 	// File handle info
 	uint8_t flags;
 	idx_t length;
-	time_t last_modified;
 	bool range_read = false;
 
 	// Read info
