@@ -1,9 +1,23 @@
 #pragma once
 
+#include <chrono>
+#include <cstdint>
+#include <ratio>
 #include <string>
 #include <string_view>
 
 namespace duckdb {
+
+struct UtcClock {
+    using rep = std::uint64_t;
+    using ratio = std::micro;
+    using duration = std::chrono::duration<rep, ratio>;
+    using time_point = std::chrono::time_point<UtcClock>;
+
+    constexpr static bool is_steady = true;  // NOLINT
+
+    static time_point now() noexcept;  // NOLINT
+};
 
 std::string GetEnv(const std::string &env) noexcept;
 

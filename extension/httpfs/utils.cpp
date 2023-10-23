@@ -1,9 +1,25 @@
 #include "utils.hpp"
 
+#include <cstdint>
+#include <cstdlib>
+#include <iostream>
 #include <stdexcept>
+#include <sys/time.h>
 
 namespace duckdb
 {
+
+typename UtcClock::time_point UtcClock::now() noexcept {  // NOLINT
+	::timeval tm;
+	if (::gettimeofday(&tm, nullptr) != 0) {
+		std::cerr << "::gettimeofday failed" << std::endl;
+		std::abort();
+	}
+
+	std::uint64_t count = static_cast<std::uint64_t>(tm.tv_sec) + static_cast<std::uint64_t>(tm.tv_usec) * 1'000'000;
+	duration dur {count};
+	return time_point {dur};
+}
 
 std::string GetEnv(const std::string &env) noexcept {
 	auto ptr = std::getenv(env.c_str());

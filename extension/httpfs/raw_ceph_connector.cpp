@@ -164,7 +164,25 @@ bool operator>(const CephPath &lhs, const CephPath &rhs) noexcept {
 struct RawCephConnector::RadosContext {
 	static std::unique_ptr<RadosContext> Create(librados::Rados &rados, const CephNamespace &ns,
 	                                            std::error_code &ec) noexcept {
-		// Create and initialize IO context.
+		auto ctx = CreateWithoutStriper(rados, ns, ec);
+		if (ec) {
+			return nullptr;
+		}
+
+		// Create and initialize RadosStriper.
+		auto striper = std::make_unique<libradosstriper::RadosStriper>();
+		if (auto ret = libradosstriper::RadosStriper::striper_create(*ctx->io_ctx, striper.get()); ret < 0) {
+			ec = RadosErrorCategory::GetErrorCode(-ret);
+			return nullptr;
+		}
+
+		ec = std::error_code {};
+		ctx->striper = std::move(striper);
+		return ctx;
+	}
+
+	static std::unique_ptr<RadosContext> CreateWithoutStriper(librados::Rados &rados, const CephNamespace &ns,
+	                                                          std::error_code &ec) noexcept {
 		std::unique_ptr<librados::IoCtx, void (*)(librados::IoCtx *) noexcept> io_ctx {new librados::IoCtx {},
 		                                                                               &DeleteRadosIoContext};
 		if (auto ret = rados.ioctx_create(ns.pool.c_str(), *io_ctx); ret < 0) {
@@ -180,15 +198,8 @@ struct RawCephConnector::RadosContext {
 
 		io_ctx->set_namespace(ns.ns);
 
-		// Create and initialize RadosStriper.
-		auto striper = std::make_unique<libradosstriper::RadosStriper>();
-		if (auto ret = libradosstriper::RadosStriper::striper_create(*io_ctx, striper.get()); ret < 0) {
-			ec = RadosErrorCategory::GetErrorCode(-ret);
-			return nullptr;
-		}
-
 		ec = std::error_code {};
-		return std::unique_ptr<RadosContext> {new RadosContext {std::move(io_ctx), std::move(striper)}};
+		return std::unique_ptr<RadosContext> {new RadosContext {std::move(io_ctx), nullptr}};
 	}
 
 	std::unique_ptr<librados::IoCtx, void (*)(librados::IoCtx *) noexcept> io_ctx;
@@ -268,10 +279,35 @@ bool RawCephConnector::Exist(const CephPath &path, std::error_code &ec) noexcept
 	return stat.size > 0;
 }
 
-void RawCephConnector::Create(const CephPath &path, std::error_code &ec) noexcept {
-	auto ctx = RadosContext::Create(cluster, path.ns, ec);
+bool RawCephConnector::RadosExist(const CephPath &path, std::error_code &ec) noexcept {
+	auto ctx = RadosContext::CreateWithoutStriper(cluster, path.ns, ec);
+	if (ec) {
+		return false;
+	}
+
+	ec = std::error_code {};
+
+	std::uint64_t raw_size;
+	::time_t raw_tm;
+	if (auto err = ctx->io_ctx->stat(path.path, &raw_size, &raw_tm); err < 0) {
+		if (err != -ENOENT) {
+			ec = RadosErrorCategory::GetErrorCode(-err);
+		}
+		return false;
+	}
+
+	return true;
+}
+
+void RawCephConnector::RadosCreate(const CephPath &path, std::error_code &ec) noexcept {
+	auto ctx = RadosContext::CreateWithoutStriper(cluster, path.ns, ec);
 	if (ec) {
 		return;
+	}
+
+	ec = std::error_code {};
+	if (auto err = ctx->io_ctx->create(path.path, false); err < 0) {
+		ec = RadosErrorCategory::GetErrorCode(-err);
 	}
 }
 
@@ -400,6 +436,18 @@ void RawCephConnector::Delete(const CephPath &path, std::error_code &ec) noexcep
 	ec = std::error_code {};
 }
 
+void RawCephConnector::RadosDelete(const CephPath &path, std::error_code &ec) noexcept {
+	auto ctx = RadosContext::CreateWithoutStriper(cluster, path.ns, ec);
+	if (ec) {
+		return;
+	}
+
+	ec = std::error_code {};
+	if (auto err = ctx->io_ctx->remove(path.path); err < 0) {
+		ec = RadosErrorCategory::GetErrorCode(-err);
+	}
+}
+
 std::vector<std::string> RawCephConnector::ListFiles(const CephNamespace &ns, std::error_code &ec) noexcept {
 	return ListFilesAndFilter(
 	    ns, [](const std::string &, std::error_code &) { return true; }, ec);
@@ -423,7 +471,7 @@ RawCephConnector::ListFilesAndFilter(const CephNamespace &ns,
 std::vector<std::string> RawCephConnector::ListFilesAndTransform(
     const CephNamespace &ns, const std::function<std::optional<std::string>(std::string, std::error_code &)> &transform,
     std::error_code &ec) {
-	auto ctx = RadosContext::Create(cluster, ns, ec);
+	auto ctx = RadosContext::CreateWithoutStriper(cluster, ns, ec);
 	if (ec) {
 		return {};
 	}
@@ -452,7 +500,7 @@ std::vector<std::string> RawCephConnector::ListFilesAndTransform(
 
 std::map<std::string, librados::bufferlist>
 RawCephConnector::GetOmapKv(const CephPath &path, const std::set<std::string> &keys, std::error_code &ec) noexcept {
-	auto ctx = RadosContext::Create(cluster, path.ns, ec);
+	auto ctx = RadosContext::CreateWithoutStriper(cluster, path.ns, ec);
 	if (ec) {
 		return {};
 	}
@@ -477,7 +525,7 @@ RawCephConnector::GetOmapKv(const CephPath &path, const std::set<std::string> &k
 
 void RawCephConnector::SetOmapKv(const CephPath &path, const std::map<std::string, librados::bufferlist> &kv,
                                  std::error_code &ec) noexcept {
-	auto ctx = RadosContext::Create(cluster, path.ns, ec);
+	auto ctx = RadosContext::CreateWithoutStriper(cluster, path.ns, ec);
 	if (ec) {
 		return;
 	}
@@ -488,6 +536,35 @@ void RawCephConnector::SetOmapKv(const CephPath &path, const std::map<std::strin
 	}
 
 	ec = std::error_code {};
+}
+
+void RawCephConnector::DeleteOmapKeys(const CephPath &path, const std::set<std::string> &keys,
+                                      std::error_code &ec) noexcept {
+	auto ctx = RadosContext::CreateWithoutStriper(cluster, path.ns, ec);
+	if (ec) {
+		return;
+	}
+
+	ec = std::error_code {};
+	if (auto err = ctx->io_ctx->omap_rm_keys(path.path, keys); err < 0) {
+		ec = RadosErrorCategory::GetErrorCode(-err);
+	}
+}
+
+bool RawCephConnector::HasOmapKeys(const CephPath &path, std::error_code &ec) noexcept {
+	auto ctx = RadosContext::CreateWithoutStriper(cluster, path.ns, ec);
+	if (ec) {
+		return false;
+	}
+
+	ec = std::error_code {};
+	std::set<std::string> keys;
+	if (auto err = ctx->io_ctx->omap_get_keys(path.path, "", 1, &keys); err < 0) {
+		ec = RadosErrorCategory::GetErrorCode(-err);
+		return false;
+	}
+
+	return !keys.empty();
 }
 
 } // namespace duckdb

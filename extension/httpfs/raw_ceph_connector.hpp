@@ -80,7 +80,9 @@ public:
 
 	bool Exist(const CephPath &path, std::error_code &ec) noexcept;
 
-	void Create(const CephPath &path, std::error_code &ec) noexcept;
+	bool RadosExist(const CephPath &path, std::error_code &ec) noexcept;
+
+	void RadosCreate(const CephPath &path, std::error_code &ec) noexcept;
 
 	std::size_t Read(const CephPath &path, std::uint64_t file_offset, void *buffer, std::size_t buffer_size,
 	                 std::error_code &ec) noexcept;
@@ -88,6 +90,8 @@ public:
 	std::size_t Write(const CephPath &path, const void *buffer, std::size_t buffer_size, std::error_code &ec) noexcept;
 
 	void Delete(const CephPath &path, std::error_code &ec) noexcept;
+
+	void RadosDelete(const CephPath &path, std::error_code &ec) noexcept;
 
 	std::vector<std::string> ListFiles(const CephNamespace &ns, std::error_code &ec) noexcept;
 
@@ -141,6 +145,10 @@ public:
 
 		SetOmapKv(path, raw_kv, ec);
 	}
+
+	void DeleteOmapKeys(const CephPath &path, const std::set<std::string> &keys, std::error_code &ec) noexcept;
+
+	bool HasOmapKeys(const CephPath &path, std::error_code &ec) noexcept;
 
 private:
 	struct RadosContext;

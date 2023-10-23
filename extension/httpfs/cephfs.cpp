@@ -238,14 +238,7 @@ bool CephFileSystem::CanHandleFile(const string &fpath) {
 
 bool CephFileSystem::ListFiles(const string &directory, const std::function<void(const string &, bool)> &callback,
                                FileOpener *opener) {
-
 	if (directory == "ceph://persist_index") {
-		if (GetJdfsUsername().empty()) {
-			return true;
-		}
-
-		CephConnector::GetSingleton().PersistChangeInMessageQueueToCeph();
-
 		return true;
 	}
 

@@ -1,11 +1,9 @@
 #include "include/ceph_connector.hpp"
 
 #include "LRUCache11.hpp"
-#include "boost/interprocess/interprocess_fwd.hpp"
 #include "rados/librados.hpp"
 #include "radosstriper/libradosstriper.hpp"
 #include "raw_ceph_connector.hpp"
-#include "tsl/htrie_map.h"
 #include "utils.hpp"
 
 #include <array>
@@ -51,44 +49,7 @@ constexpr const char CEPH_INDEX_FILE[] = ".ceph_index";
 
 constexpr std::chrono::minutes CACHE_VALID_DURATION {10};
 
-constexpr std::size_t MQ_SIZE_THRESHOLD = CEPH_INDEX_MQ_SIZE - 1024;
-
 pid_t current_pid = getpid();
-
-std::optional<fs::path> GetHomeDirectory() {
-	struct passwd *pw = ::getpwuid(getuid());
-	fs::path homedir = pw->pw_dir;
-	if (!fs::exists(homedir)) {
-		return std::nullopt;
-	}
-	return homedir;
-}
-
-std::optional<fs::path> GetLocalIndexCacheFilePath(const CephNamespace &ns, bool create) {
-	auto path_opt = GetHomeDirectory();
-	if (!path_opt.has_value()) {
-		return std::nullopt;
-	}
-
-	auto &path = path_opt.value();
-	path /= ".datacore/.cache";
-	if (!fs::exists(path)) {
-		if (create) {
-			fs::create_directories(path);
-		} else {
-			return std::nullopt;
-		}
-	}
-
-	auto filename = [&ns]() {
-		std::ostringstream builder;
-		builder << ns.pool << "__" << ns.ns << "__index";
-		return builder.str();
-	}();
-	path /= filename;
-
-	return path_opt;
-}
 
 struct FileMetaCache {
 	// to cache PARQUET footer and meta and very small files
@@ -106,49 +67,6 @@ struct FileMetaCache {
 		auto dur = std::chrono::system_clock::now() - cache_time;
 		return dur.count() < 0 || dur > CACHE_VALID_DURATION;
 	}
-};
-
-/// A timestamp value packed with a 1-bit flag.
-struct PackedTimestamp {
-public:
-	static std::optional<PackedTimestamp> Deserialize(const librados::bufferlist &buffer) noexcept {
-		if (buffer.length() != sizeof(PackedTimestamp)) {
-			return std::nullopt;
-		}
-
-		auto flat_buffer = buffer.to_str();
-
-		PackedTimestamp tm;
-		std::memcpy(&tm, flat_buffer.data(), sizeof(PackedTimestamp));
-
-		return tm;
-	}
-
-	PackedTimestamp() noexcept = default;
-
-	PackedTimestamp(std::uint64_t tm, bool flag) noexcept : raw {(tm << 1) | flag} {
-	}
-
-	std::uint64_t GetPacked() const noexcept {
-		return raw;
-	}
-
-	std::uint64_t GetTimestamp() const noexcept {
-		return raw >> 1;
-	}
-
-	bool GetFlag() const noexcept {
-		return raw & 1;
-	}
-
-	librados::bufferlist Serialize() const noexcept {
-		librados::bufferlist buffer;
-		buffer.append(const_cast<char *>(reinterpret_cast<const char *>(this)), sizeof(PackedTimestamp));
-		return buffer;
-	}
-
-private:
-	std::uint64_t raw;
 };
 
 class IndexDeserializer {
@@ -173,242 +91,123 @@ private:
 	const char *input;
 };
 
-std::uint64_t GetTimeNs() noexcept {
-	return std::chrono::nanoseconds {std::chrono::system_clock::now().time_since_epoch()}.count();
+std::optional<std::chrono::time_point<UtcClock>> DeserializeUtcTimePoint(const librados::bufferlist &buffer) noexcept {
+	if (buffer.length() != sizeof(typename UtcClock::rep)) {
+		return std::nullopt;
+	}
+
+	typename UtcClock::rep count;
+	char *ptr = reinterpret_cast<char *>(&count);
+
+	for (const auto &buf : buffer.buffers()) {
+		std::memcpy(ptr, buf.c_str(), buf.length());
+		ptr += buf.length();
+	}
+
+	return std::chrono::time_point<UtcClock> {UtcClock::duration {count}};
 }
 
-void MergeIndexes(std::map<std::string, PackedTimestamp> &target,
-                  const std::map<std::string, PackedTimestamp> &src) noexcept {
-	for (auto it = src.begin(); it != src.end(); ++it) {
-		auto target_it = target.find(it->first);
-		if (target_it == target.end() || target_it->second.GetTimestamp() < it->second.GetTimestamp()) {
-			target[it->first] = it->second;
-		}
-	}
-}
+librados::bufferlist SerializeUtcTimePoint(std::chrono::time_point<UtcClock> tm) noexcept {
+	std::uint64_t count = tm.time_since_epoch().count();
 
-void MergeIndexes(tsl::htrie_map<char, PackedTimestamp> &target,
-                  const tsl::htrie_map<char, PackedTimestamp> &src) noexcept {
-	std::string key_buffer;
-	for (auto it = src.begin(); it != src.end(); ++it) {
-		it.key(key_buffer);
-		auto target_it = target.find(key_buffer);
-		if (target_it == target.end() || target_it.value().GetTimestamp() < it.value().GetTimestamp()) {
-			target[key_buffer] = it.value();
-		}
-	}
+	librados::bufferlist buffer;
+	buffer.append(reinterpret_cast<const char *>(&count), sizeof(count));
+
+	return buffer;
 }
 
 } // namespace
 
 class CephConnector::FileIndexManager {
 public:
-	explicit FileIndexManager(RawCephConnector &raw) noexcept
-	    : raw {raw}, mu {}, raw_file_meta {}, increment_file_meta {} {
+	explicit FileIndexManager(RawCephConnector &raw) noexcept : raw {raw} {
 	}
 
 	void InsertOrUpdate(const CephPath &path) {
-		Update(path, PackedTimestamp {GetTimeNs(), true});
+		InsertOrUpdate(std::vector<CephPath> {path});
 	}
 
-	void Delete(const CephPath &path) {
-		Update(path, PackedTimestamp {GetTimeNs(), false});
-	}
+	void InsertOrUpdate(const std::vector<CephPath> &paths) {
+		// Collect updates for each object directory.
+		auto query_time = UtcClock::now();
+		std::map<CephPath, std::map<std::string, std::chrono::time_point<UtcClock>>, std::greater<CephPath>> updates;
 
-	std::vector<std::string> ListFiles(const CephPath &prefix) {
-		std::unordered_map<std::string, PackedTimestamp> ret;
+		for (const auto &p : paths) {
+			fs::path oid_path {p.path};
+			auto object_name = oid_path.filename().string();
+			auto object_dir = oid_path.parent_path();
+			CephPath dir_path {p.ns, object_dir.string()};
 
-		auto collect = [this, &prefix, &ret](
-		                   std::map<CephNamespace, tsl::htrie_map<char, PackedTimestamp>> FileIndexManager::*member) {
-			std::string object_name;
-			auto prefix_range = (this->*member)[prefix.ns].equal_prefix_range(prefix.path);
-			for (auto it = prefix_range.first; it != prefix_range.second; it++) {
-				it.key(object_name);
-				auto eit = ret.find(object_name);
-				if (eit == ret.end() || eit->second.GetTimestamp() < it.value().GetTimestamp()) {
-					ret[object_name] = it.value();
-				}
-			}
-		};
-
-		// Fist collect file names from the local incremental index cache.
-		bool raw_empty = [this, &collect, &prefix]() {
-			std::lock_guard lk {mu};
-			collect(&FileIndexManager::increment_file_meta);
-			return raw_file_meta[prefix.ns].empty();
-		}();
-		if (raw_empty) {
-			LoadIndexFromLocalCache(prefix.ns);
-			PullIndexFromCeph(prefix.ns);
-		}
-
-		// Collect file names from the local copy of the index files.
-		{
-			std::lock_guard lk {mu};
-			collect(&FileIndexManager::raw_file_meta);
-		}
-
-		std::vector<std::string> obj_list;
-		for (auto &[k, v] : ret) {
-			if (v.GetFlag()) {
-				obj_list.push_back(k);
-			}
-		}
-		return obj_list;
-	}
-
-	void Refresh(const CephNamespace &ns) {
-		std::error_code ec;
-		auto object_names = ListObjectsDirect(CephPath {ns, ""}, ec);
-		if (ec) {
-			return;
-		}
-
-		PackedTimestamp query_time {GetTimeNs(), true};
-
-		// Update raw_meta.
-		std::lock_guard lk {mu};
-
-		raw_file_meta[ns].clear();
-		for (std::size_t i = 0; i < object_names.size(); i++) {
-			raw_file_meta[ns][object_names[i]] = query_time;
-		}
-		raw_file_meta[ns].shrink_to_fit();
-
-		PushIndexToCeph(ns, raw_file_meta[ns]);
-	}
-
-	void PersistChangeInMqToCeph() {
-		auto mq = OpenMq();
-		if (mq.get_num_msg() > 0) {
-			PersistChangeInMqToCeph(mq);
-		} else {
-			boost::interprocess::message_queue::remove(GetJdfsUsername().data());
-		}
-	}
-
-private:
-	struct MqMessage {
-		MqMessage() noexcept = default;
-
-		MqMessage(const CephPath &key, PackedTimestamp tm) : path {}, path_len {0}, tm {tm} {
-			auto s = key.ToString();
-			if (s.size() > path.size()) {
-				throw std::runtime_error("path is to long");
-			}
-			std::memcpy(path.data(), s.data(), s.size());
-			path_len = s.size();
-		}
-
-		std::array<char, 240> path;
-		std::size_t path_len;
-		PackedTimestamp tm;
-	};
-
-	static boost::interprocess::message_queue OpenMq() {
-		return boost::interprocess::message_queue {boost::interprocess::open_or_create, GetJdfsUsername().data(),
-		                                           CEPH_INDEX_MQ_SIZE, sizeof(MqMessage)};
-	}
-
-	RawCephConnector &raw;
-	std::mutex mu;
-	std::map<CephNamespace, tsl::htrie_map<char, PackedTimestamp>> raw_file_meta;
-	std::map<CephNamespace, tsl::htrie_map<char, PackedTimestamp>> increment_file_meta;
-
-	void PersistChangeInMqToCeph(boost::interprocess::message_queue &mq) {
-		if (mq.get_num_msg() == 0) {
-			return;
-		}
-
-		MqMessage elem;
-		std::size_t recv_size;
-		unsigned int pq;
-
-		std::map<CephNamespace, tsl::htrie_map<char, PackedTimestamp>> mp;
-		while (mq.try_receive(&elem, sizeof(elem), recv_size, pq)) {
-			auto url = std::string_view(elem.path.data(), elem.path_len);
-			std::string path, pool, ns;
-			ParseUrl(url, pool, ns, path);
-
-			if (path == CEPH_INDEX_FILE) {
-				continue;
-			}
-
-			CephNamespace key {pool, ns};
-			auto it = mp[key].find(path);
-			if (it == mp[key].end() || it.value().GetTimestamp() < elem.tm.GetTimestamp()) {
-				mp[key][path] = elem.tm;
-			}
-		}
-
-		boost::interprocess::message_queue::remove(GetJdfsUsername().data());
-
-		for (auto &[ns, index] : mp) {
-			PushIndexToCeph(ns, index);
-		}
-	}
-
-	void Update(const CephPath &path, PackedTimestamp tm) {
-		auto mq = OpenMq();
-		if (mq.get_num_msg() > MQ_SIZE_THRESHOLD) {
-			PersistChangeInMqToCeph(mq);
-		}
-
-		MqMessage msg {path, tm};
-		mq.send(&msg, sizeof(msg), 0);
-
-		std::lock_guard lk {mu};
-		increment_file_meta[path.ns][path.path] = tm;
-	}
-
-	void PushIndexToCeph(const CephNamespace &ns, const tsl::htrie_map<char, PackedTimestamp> &index) {
-		// Collect updates for each index file.
-		std::unordered_map<std::string, std::map<std::string, PackedTimestamp>> updates;
-
-		std::string oid;
-		for (auto it = index.begin(); it != index.end(); ++it) {
-			it.key(oid);
-			auto tm = it.value();
-
-			fs::path oid_path {oid};
-			auto oid_root = oid_path.root_path();
-
-			do {
-				auto component_name = oid_path.filename();
-				auto parent = oid_path.parent_path();
-				auto index_path = parent / CEPH_INDEX_FILE;
-
-				updates[index_path.string()].emplace(component_name.string(), tm);
-
-				oid_path = std::move(parent);
-			} while (oid_path != oid_root);
+			updates[dir_path].emplace(std::move(object_name), query_time);
 		}
 
 		// Apply the updates.
-		for (const auto &[index_oid, kv_updates] : updates) {
-			CephPath index_path {ns, index_oid};
+		while (!updates.empty()) {
+			auto update_entry = std::move(*updates.begin());
+			updates.erase(updates.begin());
 
-			std::set<std::string> update_keys;
-			for (const auto &[k, v] : kv_updates) {
-				update_keys.insert(k);
+			fs::path index_oid {update_entry.first.path};
+			index_oid /= CEPH_INDEX_FILE;
+
+			CephPath index_path {update_entry.first.ns, index_oid.string()};
+			auto recurse_parent = [this, &update_entry, &index_path]() {
+				auto ret = false;
+				std::error_code ec {};
+				if (!raw.RadosExist(index_path, ec) && !ec) {
+					raw.RadosCreate(index_path, ec);
+					ret = true;
+				}
+				if (!ec) {
+					raw.SetOmapKv<std::chrono::time_point<UtcClock>>(index_path, update_entry.second,
+					                                                 &SerializeUtcTimePoint, ec);
+					if (ec) {
+						ret = false;
+					}
+				}
+				return ret;
+			}();
+			if (!recurse_parent || update_entry.first.path == "/") {
+				continue;
 			}
 
-			std::error_code ec;
-			auto existing_kv =
-			    raw.GetOmapKv<PackedTimestamp>(index_path, update_keys, &PackedTimestamp::Deserialize, ec);
+			fs::path dir_path {update_entry.first.path};
+			auto parent_dir = dir_path.parent_path().string();
+			auto dir_name = dir_path.filename().string();
+
+			CephPath parent_dir_path {update_entry.first.ns, parent_dir};
+			updates[parent_dir_path].emplace(std::move(dir_name), query_time);
+		}
+	}
+
+	void Delete(const CephPath &path) {
+		fs::path oid_path {path.path};
+		fs::path root = "/";
+		for (; oid_path != root; oid_path = oid_path.parent_path()) {
+			auto object_name = oid_path.filename().string();
+
+			auto index_oid = oid_path.parent_path();
+			index_oid /= CEPH_INDEX_FILE;
+			CephPath index_path {path.ns, index_oid.string()};
+
+			std::error_code ec {};
+			if (!raw.RadosExist(index_path, ec) || ec) {
+				continue;
+			}
+
+			std::set<std::string> delete_keys {object_name};
+			raw.DeleteOmapKeys(index_path, delete_keys, ec);
 			if (ec) {
 				continue;
 			}
 
-			MergeIndexes(existing_kv, kv_updates);
-
-			raw.SetOmapKv<PackedTimestamp>(
-			    index_path, existing_kv, [](const PackedTimestamp &tm) { return tm.Serialize(); }, ec);
+			if (!raw.HasOmapKeys(index_path, ec) && !ec) {
+				raw.RadosDelete(index_path, ec);
+			}
 		}
 	}
 
-	void PullIndexFromCeph(const CephNamespace &ns) {
-		tsl::htrie_map<char, PackedTimestamp> pulled_index;
+	std::vector<std::string> ListFiles(const CephPath &prefix) {
+		std::vector<std::string> files;
 
 		std::queue<fs::path> pull_queue;
 		pull_queue.emplace("/");
@@ -419,29 +218,28 @@ private:
 			auto index_oid = next_to_pull / CEPH_INDEX_FILE;
 
 			std::error_code ec;
-			auto index_omap_kv =
-			    raw.GetOmapKv<PackedTimestamp>(CephPath {ns, index_oid}, {}, &PackedTimestamp::Deserialize, ec);
+			auto index_omap_kv = raw.GetOmapKv<std::chrono::time_point<UtcClock>>(CephPath {prefix.ns, index_oid}, {},
+			                                                                      &DeserializeUtcTimePoint, ec);
 			if (ec) {
 				index_omap_kv = {};
 			}
 
 			if (index_omap_kv.empty()) {
-				auto object_names = ListObjectsDirect(CephPath {ns, next_to_pull.string()}, ec);
+				auto object_names = ListObjectsDirect(CephPath {prefix.ns, next_to_pull.string()}, ec);
 				if (ec) {
 					continue;
 				}
-				PackedTimestamp query_time {GetTimeNs(), true};
 				for (auto &name : object_names) {
 					auto oid_path = next_to_pull / name;
-					pulled_index[oid_path.string()] = query_time;
+					files.push_back(oid_path.string());
 				}
 				continue;
 			}
 
 			for (auto &[component, tm] : index_omap_kv) {
 				auto next_level_path = next_to_pull / component;
-				if (raw.Exist(CephPath {ns, next_level_path.string()}, ec) && !ec) {
-					pulled_index[next_level_path.string()] = tm;
+				if (raw.Exist(CephPath {prefix.ns, next_level_path.string()}, ec) && !ec) {
+					files.push_back(next_level_path.string());
 					continue;
 				}
 				if (ec) {
@@ -452,37 +250,27 @@ private:
 			}
 		}
 
-		std::lock_guard lk {mu};
-		MergeIndexes(raw_file_meta[ns], pulled_index);
+		return files;
 	}
 
-	void LoadIndexFromLocalCache(const CephNamespace &ns) {
-		auto local_cache = GetLocalIndexCacheFilePath(ns, false);
-		if (!local_cache.has_value()) {
+	void Refresh(const CephNamespace &ns) {
+		std::error_code ec;
+		auto object_names = ListObjectsDirect(CephPath {ns, ""}, ec);
+		if (ec) {
 			return;
 		}
 
-		auto local_cache_buffer = [&local_cache]() {
-			std::ifstream fin {local_cache.value()};
-			std::stringstream buf;
-			buf << fin.rdbuf();
-			return buf.str();
-		}();
-
-		IndexDeserializer deserializer {local_cache_buffer.c_str()};
-		auto tmp = tsl::htrie_map<char, PackedTimestamp>::deserialize(deserializer);
-		auto &target = raw_file_meta[ns];
-
-		std::lock_guard lk {mu};
-		std::string key_buffer;
-		for (auto it = tmp.begin(); it != tmp.end(); ++it) {
-			it.key(key_buffer);
-			auto mit = target.find(key_buffer);
-			if (mit == target.end() || mit.value().GetTimestamp() < it.value().GetTimestamp()) {
-				target[key_buffer] = it.value();
-			}
+		std::vector<CephPath> object_paths;
+		object_paths.reserve(object_names.size());
+		for (auto &name : object_names) {
+			object_paths.push_back(CephPath {ns, std::move(name)});
 		}
+
+		InsertOrUpdate(object_paths);
 	}
+
+private:
+	RawCephConnector &raw;
 
 	std::vector<std::string> ListObjectsDirect(const CephPath &prefix, std::error_code &ec) {
 		return raw.ListFilesAndTransform(
@@ -747,10 +535,6 @@ std::vector<std::string> CephConnector::ListFiles(const std::string &path, const
 void CephConnector::RefreshFileIndex(const std::string &pool, const std::string &ns) {
 	CephNamespace key {pool, ns};
 	index_manager->Refresh(key);
-}
-
-void CephConnector::PersistChangeInMessageQueueToCeph() {
-	index_manager->PersistChangeInMqToCeph();
 }
 
 void CephConnector::DisableCache() {

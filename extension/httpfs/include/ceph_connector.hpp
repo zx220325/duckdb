@@ -1,7 +1,5 @@
 #pragma once
 
-#include "boost/interprocess/ipc/message_queue.hpp"
-
 #include <array>
 #include <cstddef>
 #include <memory>
@@ -35,8 +33,6 @@ public:
 	std::vector<std::string> ListFiles(const std::string &pathprefix, const std::string &pool, const std::string &ns);
 
 	void RefreshFileIndex(const std::string &pool, const std::string &ns);
-
-	void PersistChangeInMessageQueueToCeph();
 
 	void DisableCache();
 
