@@ -279,18 +279,19 @@ CephStat RawCephConnector::Stat(const CephPath &path, std::error_code &ec) noexc
 		return {};
 	}
 
-	std::uint64_t raw_size;
-	::time_t raw_tm;
-	if (auto err = ctx->striper->stat(path.path, &raw_size, &raw_tm); err < 0) {
+	std::uint64_t raw_size {0};
+	::time_t raw_tm {0};
+	if (auto err = ctx->striper->stat(path.path, &raw_size, &raw_tm); err < 0 && err != -ENODATA) {
+		// Stat an empty file will return -ENODATA.
 		ec = RadosErrorCategory::GetErrorCode(-err);
 		return {};
 	}
-
 	if (raw_size == 0) {
 		ceph::bufferlist bufferlist;
-		if (auto ret = ctx->io_ctx->getxattr(path.path + CEPH_OBJ_SUFFIX, "striper.layout.object_size", bufferlist);
-		    ret < 0) {
-			ec = RadosErrorCategory::GetErrorCode(-ret);
+		if (auto err = ctx->io_ctx->getxattr(path.path + CEPH_OBJ_SUFFIX, "striper.layout.object_size", bufferlist);
+		    err < 0 && err != -ENODATA) {
+			// Stat an empty file will return -ENODATA.
+			ec = RadosErrorCategory::GetErrorCode(-err);
 			return {};
 		}
 	}

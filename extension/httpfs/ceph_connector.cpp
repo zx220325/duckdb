@@ -181,17 +181,19 @@ public:
 
 			std::error_code ec {};
 			if (!raw.RadosExist(index_path, ec) || ec) {
-				continue;
+				break;
 			}
 
 			std::set<std::string> delete_keys {object_name};
 			raw.DeleteOmapKeys(index_path, delete_keys, ec);
 			if (ec) {
-				continue;
+				break;
 			}
 
 			if (!raw.HasOmapKeys(index_path, ec) && !ec) {
 				raw.RadosDelete(index_path, ec);
+			} else {
+				break;
 			}
 		}
 	}
@@ -426,7 +428,7 @@ bool CephConnector::Exist(const std::string &path, const std::string &pool, cons
 
 	auto exist = false;
 	meta_manager->GetFileMetaAndDo(
-	    key, [&exist](const FileMetaCache &c, std::error_code &) { exist = c.stat.size > 0; }, ec);
+	    key, [&exist](const FileMetaCache &, std::error_code &) { exist = true; }, ec);
 
 	return exist;
 }

@@ -59,7 +59,6 @@ private:
 		}
 
 		for (const auto &oid : oid_list) {
-			std::cout << "ClearNamespace: deleting object " << oid << "\n";
 			raw_connector->RadosDelete(duckdb::CephPath {TEST_NAMESPACE, oid}, ec);
 			if (ec) {
 				throw std::runtime_error {"ClearNamespace: cannot delete files"};
@@ -84,9 +83,36 @@ TEST_F(CephConnectorTest, WriteAndRead) {
 	ASSERT_EQ(buffer, data);
 }
 
+TEST_F(CephConnectorTest, ReadWriteEmptyFile) {
+	std::string oid = "/test.parquet";
+	std::string data = "";
+
+	std::error_code ec;
+	auto ret = connector->Write(oid, TEST_NAMESPACE.pool, TEST_NAMESPACE.ns, data.c_str(), data.length());
+	ASSERT_EQ(ret, 0);
+
+	CheckIndex("/.ceph_index", {"test.parquet"});
+
+	data.resize(4);
+	ret = connector->Read(oid, TEST_NAMESPACE.pool, TEST_NAMESPACE.ns, 0, data.data(), data.length());
+	ASSERT_EQ(ret, 0);
+}
+
 TEST_F(CephConnectorTest, GetSize) {
 	std::string oid = "/test.parquet";
 	std::string data = "hello";
+
+	std::error_code ec;
+	auto ret = connector->Write(oid, TEST_NAMESPACE.pool, TEST_NAMESPACE.ns, data.c_str(), data.length());
+	ASSERT_EQ(ret, data.length());
+
+	auto sz = connector->Size(oid, TEST_NAMESPACE.pool, TEST_NAMESPACE.ns);
+	ASSERT_EQ(sz, data.length());
+}
+
+TEST_F(CephConnectorTest, GetSizeEmptyFile) {
+	std::string oid = "/test.parquet";
+	std::string data = "";
 
 	std::error_code ec;
 	auto ret = connector->Write(oid, TEST_NAMESPACE.pool, TEST_NAMESPACE.ns, data.c_str(), data.length());
@@ -102,6 +128,26 @@ TEST_F(CephConnectorTest, GetSizeNonExist) {
 
 	auto sz = connector->Size(oid, TEST_NAMESPACE.pool, TEST_NAMESPACE.ns);
 	ASSERT_EQ(sz, -ENOENT);
+}
+
+TEST_F(CephConnectorTest, Exist) {
+	std::string data = "hello";
+
+	std::error_code ec;
+	auto ret = connector->Write("/test.parquet", TEST_NAMESPACE.pool, TEST_NAMESPACE.ns, data.c_str(), data.length());
+	ASSERT_EQ(ret, data.length());
+
+	ret = connector->Write("/test_empty.parquet", TEST_NAMESPACE.pool, TEST_NAMESPACE.ns, "", 0);
+	ASSERT_EQ(ret, 0);
+
+	auto exist = connector->Exist("/nonexist.parquet", TEST_NAMESPACE.pool, TEST_NAMESPACE.ns);
+	ASSERT_FALSE(exist);
+
+	exist = connector->Exist("/test.parquet", TEST_NAMESPACE.pool, TEST_NAMESPACE.ns);
+	ASSERT_TRUE(exist);
+
+	exist = connector->Exist("/test_empty.parquet", TEST_NAMESPACE.pool, TEST_NAMESPACE.ns);
+	ASSERT_TRUE(exist);
 }
 
 TEST_F(CephConnectorTest, ReadNonExist) {
@@ -125,6 +171,10 @@ TEST_F(CephConnectorTest, Delete) {
 	std::string buffer(data.length(), 0);
 	auto read_ret = connector->Read(oid, TEST_NAMESPACE.pool, TEST_NAMESPACE.ns, 0, buffer.data(), buffer.length());
 	ASSERT_EQ(read_ret, -ENOENT);
+
+	auto index_exist = connector->GetRawConnector()->RadosExist(duckdb::CephPath {TEST_NAMESPACE, "/.ceph_index"}, ec);
+	ASSERT_FALSE(ec);
+	ASSERT_FALSE(index_exist);
 }
 
 TEST_F(CephConnectorTest, DeleteNonExist) {
@@ -166,6 +216,11 @@ TEST_F(CephConnectorTest, ListFiles) {
 		auto write_ret = connector->Write(oid, TEST_NAMESPACE.pool, TEST_NAMESPACE.ns, data.c_str(), data.length());
 		ASSERT_EQ(write_ret, data.length());
 	}
+
+	CheckIndex("/mbd/orders/.ceph_index", {"a.parquet", "b.parquet"});
+	CheckIndex("/mbd/trades/.ceph_index", {"a.parquet", "b.parquet"});
+	CheckIndex("/mbd/.ceph_index", {"orders", "trades"});
+	CheckIndex("/.ceph_index", {"mbd"});
 
 	auto files_list = connector->ListFiles("", TEST_NAMESPACE.pool, TEST_NAMESPACE.ns);
 
@@ -223,6 +278,65 @@ TEST_F(CephConnectorTest, ListFilesNoIndex) {
 	ASSERT_EQ(expected_file_names, file_names);
 }
 
+TEST_F(CephConnectorTest, ListFilesAfterDelete) {
+	std::vector<std::string> oid_list {"/mbd/orders/a.parquet", "/mbd/orders/b.parquet", "/mbd/trades/a.parquet",
+	                                   "/mbd/trades/b.parquet"};
+	for (const auto &oid : oid_list) {
+		duckdb::CephPath object_path {TEST_NAMESPACE, oid};
+		std::string data = "hello";
+		auto write_ret = connector->Write(oid, TEST_NAMESPACE.pool, TEST_NAMESPACE.ns, data.c_str(), data.length());
+		ASSERT_EQ(write_ret, data.length());
+	}
+
+	auto delete_ret = connector->Delete("/mbd/trades/b.parquet", TEST_NAMESPACE.pool, TEST_NAMESPACE.ns);
+	ASSERT_TRUE(delete_ret);
+
+	CheckIndex("/mbd/orders/.ceph_index", {"a.parquet", "b.parquet"});
+	CheckIndex("/mbd/trades/.ceph_index", {"a.parquet"});
+	CheckIndex("/mbd/.ceph_index", {"orders", "trades"});
+	CheckIndex("/.ceph_index", {"mbd"});
+
+	auto files_list = connector->ListFiles("", TEST_NAMESPACE.pool, TEST_NAMESPACE.ns);
+
+	std::set<std::string> file_names;
+	for (const auto &f : files_list) {
+		file_names.insert(f);
+	}
+
+	std::set<std::string> expected_file_names {"/mbd/orders/a.parquet", "/mbd/orders/b.parquet",
+	                                           "/mbd/trades/a.parquet"};
+	ASSERT_EQ(expected_file_names, file_names);
+}
+
+TEST_F(CephConnectorTest, ListFilesAfterReplace) {
+	std::string data = "hello";
+	std::vector<std::string> oid_list {"/mbd/orders/a.parquet", "/mbd/orders/b.parquet", "/mbd/trades/a.parquet",
+	                                   "/mbd/trades/b.parquet"};
+	for (const auto &oid : oid_list) {
+		duckdb::CephPath object_path {TEST_NAMESPACE, oid};
+		auto write_ret = connector->Write(oid, TEST_NAMESPACE.pool, TEST_NAMESPACE.ns, data.c_str(), data.length());
+		ASSERT_EQ(write_ret, data.length());
+	}
+
+	auto delete_ret = connector->Delete("/mbd/trades/b.parquet", TEST_NAMESPACE.pool, TEST_NAMESPACE.ns);
+	ASSERT_TRUE(delete_ret);
+
+	auto write_ret =
+	    connector->Write("/mbd/trades/b.parquet", TEST_NAMESPACE.pool, TEST_NAMESPACE.ns, data.c_str(), data.length());
+	ASSERT_EQ(write_ret, data.length());
+
+	auto files_list = connector->ListFiles("", TEST_NAMESPACE.pool, TEST_NAMESPACE.ns);
+
+	std::set<std::string> file_names;
+	for (const auto &f : files_list) {
+		file_names.insert(f);
+	}
+
+	std::set<std::string> expected_file_names {"/mbd/orders/a.parquet", "/mbd/orders/b.parquet",
+	                                           "/mbd/trades/a.parquet", "/mbd/trades/b.parquet"};
+	ASSERT_EQ(expected_file_names, file_names);
+}
+
 TEST_F(CephConnectorTest, GetLastModifiedTime) {
 	std::string oid = "/test.parquet";
 	std::string data = "hello";
@@ -231,31 +345,31 @@ TEST_F(CephConnectorTest, GetLastModifiedTime) {
 	auto write_ret = connector->Write(oid, TEST_NAMESPACE.pool, TEST_NAMESPACE.ns, data.c_str(), data.length());
 	ASSERT_EQ(write_ret, data.length());
 
-    auto modified_time = connector->GetLastModifiedTime(oid, TEST_NAMESPACE.pool, TEST_NAMESPACE.ns);
-    ASSERT_GT(modified_time, 0);
+	auto modified_time = connector->GetLastModifiedTime(oid, TEST_NAMESPACE.pool, TEST_NAMESPACE.ns);
+	ASSERT_GT(modified_time, 0);
 
-    for (auto i = 0; i < 3; ++i) {
-        auto read_ret = connector->Read(oid, TEST_NAMESPACE.pool, TEST_NAMESPACE.ns, 0, data.data(), data.length());
-        ASSERT_EQ(read_ret, data.length());
+	for (auto i = 0; i < 3; ++i) {
+		auto read_ret = connector->Read(oid, TEST_NAMESPACE.pool, TEST_NAMESPACE.ns, 0, data.data(), data.length());
+		ASSERT_EQ(read_ret, data.length());
 
-        std::this_thread::sleep_for(std::chrono::seconds {1});
-        connector->ClearCache();
-    }
+		std::this_thread::sleep_for(std::chrono::seconds {1});
+		connector->ClearCache();
+	}
 
-    auto now_modified_time = connector->GetLastModifiedTime(oid, TEST_NAMESPACE.pool, TEST_NAMESPACE.ns);
-    ASSERT_EQ(modified_time, now_modified_time);
+	auto now_modified_time = connector->GetLastModifiedTime(oid, TEST_NAMESPACE.pool, TEST_NAMESPACE.ns);
+	ASSERT_EQ(modified_time, now_modified_time);
 
-    write_ret = connector->Write(oid, TEST_NAMESPACE.pool, TEST_NAMESPACE.ns, data.c_str(), data.length());
-    ASSERT_EQ(write_ret, data.length());
+	write_ret = connector->Write(oid, TEST_NAMESPACE.pool, TEST_NAMESPACE.ns, data.c_str(), data.length());
+	ASSERT_EQ(write_ret, data.length());
 
-    auto updated_modified_time = connector->GetLastModifiedTime(oid, TEST_NAMESPACE.pool, TEST_NAMESPACE.ns);
-    ASSERT_GT(updated_modified_time, modified_time);
+	auto updated_modified_time = connector->GetLastModifiedTime(oid, TEST_NAMESPACE.pool, TEST_NAMESPACE.ns);
+	ASSERT_GT(updated_modified_time, modified_time);
 }
 
 TEST_F(CephConnectorTest, GetLastModifiedTimeNonExist) {
 	std::string oid = "/test.parquet";
 	std::string data = "hello";
 
-    auto modified_time = connector->GetLastModifiedTime(oid, TEST_NAMESPACE.pool, TEST_NAMESPACE.ns);
-    ASSERT_EQ(modified_time, -ENOENT);
+	auto modified_time = connector->GetLastModifiedTime(oid, TEST_NAMESPACE.pool, TEST_NAMESPACE.ns);
+	ASSERT_EQ(modified_time, -ENOENT);
 }
