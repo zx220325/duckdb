@@ -184,7 +184,7 @@ int64_t CephFileSystem::Write(FileHandle &handle, void *buffer, int64_t nr_bytes
 		throw InternalException("Currently only whole writes are supported");
 	}
 	auto &&cs = CephConnector::GetSingleton();
-	return cs.Write(hfh.obj_name, hfh.pool, hfh.ns, reinterpret_cast<char *>(buffer), nr_bytes);
+	return cs.Write(hfh.obj_name, hfh.pool, hfh.ns, reinterpret_cast<const char *>(buffer), nr_bytes);
 }
 
 void CephFileSystem::FileSync(FileHandle &handle) {

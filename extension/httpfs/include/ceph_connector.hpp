@@ -26,7 +26,7 @@ public:
 	std::int64_t Read(const std::string &path, const std::string &pool, const std::string &ns,
 	                  std::uint64_t file_offset, char *buffer_out, std::size_t buffer_out_len);
 
-	std::int64_t Write(const std::string &path, const std::string &pool, const std::string &ns, char *buffer_in,
+	std::int64_t Write(const std::string &path, const std::string &pool, const std::string &ns, const char *buffer_in,
 	                   std::size_t buffer_in_len);
 
 	bool Delete(const std::string &path, const std::string &pool, const std::string &ns);
@@ -37,7 +37,12 @@ public:
 
 	void RefreshFileIndex(const std::string &pool, const std::string &ns);
 
+	void ClearCache();
 	void DisableCache();
+
+	RawCephConnector *GetRawConnector() const noexcept {
+		return raw.get();
+	}
 
 private:
 	class FileIndexManager;

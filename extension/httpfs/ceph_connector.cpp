@@ -6,6 +6,7 @@
 #include "raw_ceph_connector.hpp"
 #include "utils.hpp"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstddef>
@@ -89,6 +90,14 @@ librados::bufferlist SerializeUtcTimePoint(std::chrono::time_point<UtcClock> tm)
 	buffer.append(reinterpret_cast<const char *>(&count), sizeof(count));
 
 	return buffer;
+}
+
+bool IsPrefix(const std::string &prefix, const std::string &s) {
+	if (prefix.length() > s.length()) {
+		return false;
+	}
+
+	return std::equal(prefix.begin(), prefix.end(), s.begin());
 }
 
 } // namespace
@@ -191,7 +200,7 @@ public:
 		std::vector<std::string> files;
 
 		std::queue<Path> pull_queue;
-		pull_queue.emplace("/");
+		pull_queue.push(Path {prefix.path}.GetBase());
 		while (!pull_queue.empty()) {
 			auto next_to_pull = std::move(pull_queue.front());
 			pull_queue.pop();
@@ -211,14 +220,20 @@ public:
 					continue;
 				}
 				for (auto &name : object_names) {
-					auto oid_path = next_to_pull / name;
-					files.push_back(oid_path.ToString());
+					if (IsPrefix(prefix.path, name)) {
+						files.push_back(std::move(name));
+					}
 				}
 				continue;
 			}
 
 			for (auto &[component, tm] : index_omap_kv) {
 				auto next_level_path = next_to_pull / component;
+				auto next_level_path_str = next_level_path.ToString();
+				if (!IsPrefix(prefix.path, next_level_path_str)) {
+					continue;
+				}
+
 				if (raw.Exist(CephPath {prefix.ns, next_level_path.ToString()}, ec) && !ec) {
 					files.push_back(next_level_path.ToString());
 					continue;
@@ -339,6 +354,10 @@ public:
 		cache.remove(path);
 	}
 
+	void ClearCache() noexcept {
+		cache.clear();
+	}
+
 	void DisableCache() noexcept {
 		enable_cache = false;
 		cache.clear();
@@ -414,7 +433,6 @@ bool CephConnector::Exist(const std::string &path, const std::string &pool, cons
 
 int64_t CephConnector::Read(const std::string &path, const std::string &pool, const std::string &ns,
                             std::uint64_t file_offset, char *buffer_out, std::size_t buffer_out_len) {
-	// return doRead(path, pool, ns, file_offset, buffer_out, buffer_out_len);
 	auto raw_sz = Size(path, pool, ns);
 	CHECK_RETURN(raw_sz <= 0, raw_sz);
 
@@ -483,8 +501,8 @@ int64_t CephConnector::Read(const std::string &path, const std::string &pool, co
 	return ret;
 }
 
-int64_t CephConnector::Write(const std::string &path, const std::string &pool, const std::string &ns, char *buffer_in,
-                             std::size_t buffer_in_len) {
+int64_t CephConnector::Write(const std::string &path, const std::string &pool, const std::string &ns,
+                             const char *buffer_in, std::size_t buffer_in_len) {
 	CephPath key {{pool, ns}, path};
 
 	std::error_code ec;
@@ -557,6 +575,10 @@ void CephConnector::RefreshFileIndex(const std::string &pool, const std::string 
 
 	std::error_code ec;
 	index_manager->Refresh(key, ec);
+}
+
+void CephConnector::ClearCache() {
+	meta_manager->ClearCache();
 }
 
 void CephConnector::DisableCache() {

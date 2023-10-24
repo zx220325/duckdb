@@ -115,37 +115,6 @@ Path operator/(const Path &lhs, const std::string &component) noexcept {
 	return ret;
 }
 
-std::string GetEnv(const std::string &env) noexcept {
-	auto ptr = std::getenv(env.c_str());
-	std::string ret;
-	if (ptr) {
-		ret = std::string(ptr);
-	}
-	return ret;
-}
-
-std::string_view GetJdfsUsername() noexcept {
-	static std::string JDFS_USERNAME([] {
-		std::string username;
-		auto ceph_args = GetEnv("CEPH_ARGS");
-		if (!ceph_args.empty()) {
-			auto pos = ceph_args.find("client");
-			if (pos == std::string::npos) {
-				return username;
-			}
-			auto space = ceph_args.find(' ', pos);
-			username = ceph_args.substr(pos, space - pos);
-		} else {
-			username = GetEnv("SYS_JDFS_USERNAME");
-			if (username.empty()) {
-				username = GetEnv("JDFS_USERNAME");
-			}
-		}
-		return username;
-	}());
-	return JDFS_USERNAME;
-}
-
 void ParseUrl(std::string_view url, std::string &pool_out, std::string &ns_out, std::string &path_out) {
 	if (url.rfind("ceph://", 0) != 0) {
 		throw std::runtime_error("URL needs to start ceph://");
