@@ -524,11 +524,12 @@ std::vector<std::string> RawCephConnector::ListFilesAndTransform(
 
 		auto object_name = it->get_oid();
 		auto transformed_object_name = transform(std::move(object_name), ec);
-		if (!transformed_object_name || ec) {
+		if (ec) {
 			return names;
 		}
-
-		names.push_back(std::move(transformed_object_name.value()));
+		if (transformed_object_name.has_value()) {
+			names.push_back(std::move(transformed_object_name.value()));
+		}
 	}
 
 	return names;

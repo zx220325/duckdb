@@ -3,126 +3,116 @@
 
 #include <benchmark/benchmark.h>
 #include <cstdint>
+#include <cstring>
 #include <gtest/gtest.h>
 #include <iostream>
 #include <sstream>
+#include <string>
+#include <system_error>
+#include <utility>
+#include <vector>
 
 namespace {
 
-constexpr auto NUM_FILES = 1'000'000;
-const duckdb::CephNamespace BENCH_NAMESPACE {"tech_test", "datacore_benchmark_ns"};
-
-std::string GetPopulateFilePath(int file_id) noexcept {
-	std::ostringstream builder;
-	builder << "/mbd/orders/" << file_id << ".parquet";
-	return builder.str();
-}
-
-void Setup() {
-	auto &connector = duckdb::CephConnector::GetSingleton();
-	std::string object_data = "example";
-
-	for (auto i = 0; i < NUM_FILES; ++i) {
-		if (i % 10000 == 0) {
-			std::cout << "We're writing file #" << i << ". This message shows every 10000 files." << std::endl;
-		}
-
-		auto oid = GetPopulateFilePath(i);
-		auto write_ret =
-		    connector.Write(oid, BENCH_NAMESPACE.pool, BENCH_NAMESPACE.ns, object_data.c_str(), object_data.length());
-		ASSERT_EQ(write_ret, object_data.length());
-	}
-}
-
-void Teardown() {
-	auto &connector = duckdb::CephConnector::GetSingleton();
-	for (auto i = 0; i < NUM_FILES; ++i) {
-		if (i % 10000 == 0) {
-			std::cout << "We're deleting file #" << i << ". This message shows every 10000 files." << std::endl;
-		}
-
-		auto oid = GetPopulateFilePath(i);
-		auto delete_ret = connector.Delete(oid, BENCH_NAMESPACE.pool, BENCH_NAMESPACE.ns);
-		ASSERT_TRUE(delete_ret);
-	}
-}
-
-void BenchList(benchmark::State &state) {
-	auto &connector = duckdb::CephConnector::GetSingleton();
-
-	std::uint64_t num_files_listed = 0;
-	for (auto _ : state) {
-		auto list = connector.ListFiles("", BENCH_NAMESPACE.pool, BENCH_NAMESPACE.ns);
-		num_files_listed += list.size();
-	}
-	state.SetItemsProcessed(num_files_listed);
-}
-
-void BenchListRaw(benchmark::State &state) {
-	auto &connector = duckdb::CephConnector::GetSingleton();
-	auto &raw_connector = *connector.GetRawConnector();
-
-	std::uint64_t num_files_listed = 0;
-	for (auto _ : state) {
-		std::error_code ec;
-		auto list = raw_connector.ListFiles(BENCH_NAMESPACE, ec);
-		num_files_listed += list.size();
-	}
-	state.SetItemsProcessed(num_files_listed);
-}
-
-void BenchWrite(benchmark::State &state) {
-	auto &connector = duckdb::CephConnector::GetSingleton();
-	std::string object_data = "example";
-
-	for (auto _ : state) {
-		auto oid = GetPopulateFilePath(NUM_FILES + state.iterations());
-		auto write_ret =
-		    connector.Write(oid, BENCH_NAMESPACE.pool, BENCH_NAMESPACE.ns, object_data.c_str(), object_data.length());
-		benchmark::DoNotOptimize(write_ret);
-	}
-}
-
-void BenchWriteRaw(benchmark::State &state) {
-	auto &connector = duckdb::CephConnector::GetSingleton();
-	auto &raw_connector = *connector.GetRawConnector();
-	std::string object_data = "example";
-
-	for (auto _ : state) {
-		auto oid = GetPopulateFilePath(NUM_FILES + state.iterations());
-		duckdb::CephPath path {BENCH_NAMESPACE, oid};
-
-		std::error_code ec;
-		auto write_ret = raw_connector.Write(path, object_data.c_str(), object_data.length(), ec);
-		benchmark::DoNotOptimize(write_ret);
-	}
-}
+constexpr const char BENCH_POOL_NAME[] = "tech_test";
+constexpr const char BENCH_NAMESPACE_NAME[] = "datacore_benchmark_ns";
+constexpr const char BENCH_1M_NAMESPACE_NAME[] = "datacore_benchmark_1m_ns";
 
 } // namespace
 
-BENCHMARK(BenchList)->Unit(benchmark::TimeUnit::kSecond);
-BENCHMARK(BenchListRaw)->Unit(benchmark::TimeUnit::kSecond);
-BENCHMARK(BenchWrite)->Unit(benchmark::TimeUnit::kSecond);
-BENCHMARK(BenchWriteRaw)->Unit(benchmark::TimeUnit::kSecond);
-
-int main(int argc, char **argv) {
-	char arg0_default[] = "benchmark";
-	char *args_default = arg0_default;
-	if (!argv) {
-		argc = 1;
-		argv = &args_default;
-	}
-	::benchmark::Initialize(&argc, argv);
-	if (::benchmark::ReportUnrecognizedArguments(argc, argv)) {
-		return 1;
+class CephConnectorBenchmark : public benchmark::Fixture {
+public:
+	void SetUp(const benchmark::State &) override {
+		connector = &duckdb::CephConnector::GetSingleton();
+		new_files.clear();
 	}
 
-	Setup();
+	void TearDown(const benchmark::State &) override {
+		if (!connector) {
+			return;
+		}
 
-	::benchmark::RunSpecifiedBenchmarks();
-	::benchmark::Shutdown();
+		for (const auto &f : new_files) {
+			if (use_raw_connector) {
+				std::error_code ec;
+				connector->GetRawConnector()->Delete(f, ec);
+			} else {
+				connector->Delete(f.path, f.ns.pool, f.ns.ns);
+			}
+		}
 
-	Teardown();
+		new_files.clear();
+	}
 
-	return 0;
+protected:
+	duckdb::CephConnector *connector {nullptr};
+	bool use_raw_connector {false};
+	std::vector<duckdb::CephPath> new_files {};
+};
+
+BENCHMARK_DEFINE_F(CephConnectorBenchmark, BenchList)(benchmark::State &state) {
+	std::uint64_t num_files_listed = 0;
+	for (auto _ : state) {
+		auto list = connector->ListFiles("/0", BENCH_POOL_NAME, BENCH_1M_NAMESPACE_NAME);
+		num_files_listed += list.size();
+	}
+	state.counters["files"] = num_files_listed;
 }
+
+BENCHMARK_DEFINE_F(CephConnectorBenchmark, BenchListRaw)(benchmark::State &state) {
+	std::uint64_t num_files_listed = 0;
+	for (auto _ : state) {
+		std::error_code ec;
+		auto list = connector->GetRawConnector()->ListFilesAndFilter(
+		    duckdb::CephNamespace {BENCH_POOL_NAME, BENCH_1M_NAMESPACE_NAME},
+		    [](const std::string &oid, std::error_code &) -> bool {
+			    constexpr const char PREFIX[] = "/0";
+			    return oid.length() >= 2 && std::strncmp(oid.c_str(), PREFIX, 2) == 0;
+		    },
+		    ec);
+		num_files_listed += list.size();
+	}
+	state.counters["files"] = num_files_listed;
+}
+
+BENCHMARK_DEFINE_F(CephConnectorBenchmark, BenchWrite)(benchmark::State &state) {
+	std::string object_data = "example";
+
+	std::uint64_t round = 0;
+	for (auto _ : state) {
+		auto oid = std::string("/test/") + std::to_string(round) + ".parquet";
+		auto write_ret =
+		    connector->Write(oid, BENCH_POOL_NAME, BENCH_NAMESPACE_NAME, object_data.c_str(), object_data.length());
+		benchmark::DoNotOptimize(write_ret);
+
+		new_files.push_back(duckdb::CephPath {{BENCH_POOL_NAME, BENCH_NAMESPACE_NAME}, oid});
+
+		++round;
+	}
+}
+
+BENCHMARK_DEFINE_F(CephConnectorBenchmark, BenchWriteRaw)(benchmark::State &state) {
+	use_raw_connector = true;
+	std::string object_data = "example";
+
+	std::uint64_t round = 0;
+	for (auto _ : state) {
+		auto oid = std::string("/test/") + std::to_string(round) + ".parquet";
+		duckdb::CephPath path {{BENCH_POOL_NAME, BENCH_NAMESPACE_NAME}, oid};
+
+		std::error_code ec;
+		auto write_ret = connector->GetRawConnector()->Write(path, object_data.c_str(), object_data.length(), ec);
+		benchmark::DoNotOptimize(write_ret);
+
+		new_files.push_back(std::move(path));
+
+		++round;
+	}
+}
+
+BENCHMARK_REGISTER_F(CephConnectorBenchmark, BenchList)->Unit(benchmark::TimeUnit::kSecond);
+BENCHMARK_REGISTER_F(CephConnectorBenchmark, BenchListRaw)->Unit(benchmark::TimeUnit::kSecond);
+BENCHMARK_REGISTER_F(CephConnectorBenchmark, BenchWrite)->Unit(benchmark::TimeUnit::kSecond);
+BENCHMARK_REGISTER_F(CephConnectorBenchmark, BenchWriteRaw)->Unit(benchmark::TimeUnit::kSecond);
+
+BENCHMARK_MAIN();
