@@ -83,6 +83,29 @@ TEST_F(CephConnectorTest, WriteAndRead) {
 	ASSERT_EQ(buffer, data);
 }
 
+TEST_F(CephConnectorTest, OverwriteAndRead) {
+	std::string oid = "/test.parquet";
+	std::string old_data = "old";
+
+	std::error_code ec;
+	auto ret = connector->Write(oid, TEST_NAMESPACE.pool, TEST_NAMESPACE.ns, old_data.c_str(), old_data.length());
+	ASSERT_EQ(ret, old_data.length());
+
+	std::string buffer(old_data.length(), 0);
+	ret = connector->Read(oid, TEST_NAMESPACE.pool, TEST_NAMESPACE.ns, 0, buffer.data(), buffer.length());
+	ASSERT_EQ(ret, buffer.length());
+	ASSERT_EQ(buffer, old_data);
+
+	std::string new_data = "new";
+	ret = connector->Write(oid, TEST_NAMESPACE.pool, TEST_NAMESPACE.ns, new_data.c_str(), new_data.length());
+	ASSERT_EQ(ret, new_data.length());
+
+	buffer.resize(new_data.length());
+	ret = connector->Read(oid, TEST_NAMESPACE.pool, TEST_NAMESPACE.ns, 0, buffer.data(), buffer.length());
+	ASSERT_EQ(ret, buffer.length());
+	ASSERT_EQ(buffer, new_data);
+}
+
 TEST_F(CephConnectorTest, ReadWriteEmptyFile) {
 	std::string oid = "/test.parquet";
 	std::string data = "";

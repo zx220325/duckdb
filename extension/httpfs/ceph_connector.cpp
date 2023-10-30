@@ -58,6 +58,8 @@ struct FileMetaCache {
 	// Read info
 	CephStat stat;
 
+	// The read cache. Its maximum size is given by `READ_CACHE_LEN`.
+	// The read cache always contain data from the end of the file.
 	std::unique_ptr<char[]> read_cache;
 	std::uint64_t read_cache_start_offset;
 
@@ -522,11 +524,19 @@ int64_t CephConnector::Write(const std::string &path, const std::string &pool, c
 	if (meta_manager->IsCacheEnabled()) {
 		meta_manager->GetFileMetaAndDo(
 		    key,
-		    [&buffer_in_len](FileMetaCache &c, std::error_code &) {
+		    [buffer_in, buffer_in_len](FileMetaCache &c, std::error_code &) {
 			    auto now = std::chrono::system_clock::now();
 			    c.cache_time = now;
 			    c.stat.size = buffer_in_len;
 			    c.stat.last_modified = now;
+
+			    // Update the local read cache.
+			    c.read_cache_start_offset =
+			        buffer_in_len >= FileMetaCache::READ_CACHE_LEN ? buffer_in_len - FileMetaCache::READ_CACHE_LEN : 0;
+
+				std::size_t cache_size = buffer_in_len - c.read_cache_start_offset;
+				c.read_cache.reset(new char[cache_size]);
+				std::memcpy(c.read_cache.get(), buffer_in, cache_size);
 		    },
 		    ec);
 		if (ec) {
