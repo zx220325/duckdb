@@ -259,7 +259,7 @@ bool CephFileSystem::ListFiles(const string &directory, const std::function<void
 		return true;
 	}
 	for (auto &object : cs.ListFiles(path, pool, ns)) {
-		callback("ceph://" + pool + "//" + ns + "//" + object, false);
+		callback("ceph://" + pool + "//" + ns + "/" + object, false);
 	}
 	return true;
 }
@@ -282,7 +282,7 @@ vector<string> CephFileSystem::Glob(const string &filename, FileOpener *opener) 
 	auto &&cs = CephConnector::GetSingleton();
 	for (auto &obj : cs.ListFiles(shared_path_prefix, pool, ns)) {
 		if (LikeFun::Glob(obj.c_str(), obj.size(), path.c_str(), path.size())) {
-			ret.push_back("ceph://" + pool + "//" + ns + "//" + obj);
+			ret.push_back("ceph://" + pool + "//" + ns + "/" + obj);
 		}
 	}
 	return ret;
