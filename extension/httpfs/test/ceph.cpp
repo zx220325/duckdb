@@ -75,6 +75,7 @@ TEST_F(CephConnectorTest, WriteAndRead) {
 	auto ret = connector->Write(oid, TEST_NAMESPACE.pool, TEST_NAMESPACE.ns, data.c_str(), data.length());
 	ASSERT_EQ(ret, data.length());
 
+	CheckIndex(".ceph_index", {"/"});
 	CheckIndex("/.ceph_index", {"test.parquet"});
 
 	std::string buffer(data.length(), 0);
@@ -114,6 +115,7 @@ TEST_F(CephConnectorTest, ReadWriteEmptyFile) {
 	auto ret = connector->Write(oid, TEST_NAMESPACE.pool, TEST_NAMESPACE.ns, data.c_str(), data.length());
 	ASSERT_EQ(ret, 0);
 
+	CheckIndex(".ceph_index", {"/"});
 	CheckIndex("/.ceph_index", {"test.parquet"});
 
 	data.resize(4);
@@ -224,10 +226,9 @@ TEST_F(CephConnectorTest, RefreshFileIndex) {
 
 	CheckIndex("/mbd/orders/.ceph_index", {"a.parquet", "b.parquet"});
 	CheckIndex("/mbd/trades/.ceph_index", {"a.parquet", "b.parquet"});
-
-	CheckIndex("/mbd/.ceph_index", {"orders", "trades"});
-
-	CheckIndex("/.ceph_index", {"mbd"});
+	CheckIndex("/mbd/.ceph_index", {"orders/", "trades/"});
+	CheckIndex("/.ceph_index", {"mbd/"});
+	CheckIndex(".ceph_index", {"/"});
 }
 
 TEST_F(CephConnectorTest, ListFiles) {
@@ -242,8 +243,9 @@ TEST_F(CephConnectorTest, ListFiles) {
 
 	CheckIndex("/mbd/orders/.ceph_index", {"a.parquet", "b.parquet"});
 	CheckIndex("/mbd/trades/.ceph_index", {"a.parquet", "b.parquet"});
-	CheckIndex("/mbd/.ceph_index", {"orders", "trades"});
-	CheckIndex("/.ceph_index", {"mbd"});
+	CheckIndex("/mbd/.ceph_index", {"orders/", "trades/"});
+	CheckIndex("/.ceph_index", {"mbd/"});
+	CheckIndex(".ceph_index", {"/"});
 
 	auto files_list = connector->ListFiles("", TEST_NAMESPACE.pool, TEST_NAMESPACE.ns);
 
@@ -311,8 +313,9 @@ TEST_F(CephConnectorTest, ListFilesAfterDelete) {
 
 	CheckIndex("/mbd/orders/.ceph_index", {"a.parquet", "b.parquet"});
 	CheckIndex("/mbd/trades/.ceph_index", {"a.parquet"});
-	CheckIndex("/mbd/.ceph_index", {"orders", "trades"});
-	CheckIndex("/.ceph_index", {"mbd"});
+	CheckIndex("/mbd/.ceph_index", {"orders/", "trades/"});
+	CheckIndex("/.ceph_index", {"mbd/"});
+	CheckIndex(".ceph_index", {"/"});
 
 	auto files_list = connector->ListFiles("", TEST_NAMESPACE.pool, TEST_NAMESPACE.ns);
 
@@ -352,6 +355,43 @@ TEST_F(CephConnectorTest, ListFilesAfterReplace) {
 
 	std::set<std::string> expected_file_names {"/mbd/orders/a.parquet", "/mbd/orders/b.parquet",
 	                                           "/mbd/trades/a.parquet", "/mbd/trades/b.parquet"};
+	ASSERT_EQ(expected_file_names, file_names);
+}
+
+TEST_F(CephConnectorTest, ListFilesNonRegularPaths) {
+	std::string data = "hello";
+	std::vector<std::string> oid_list {"mbd//orders/a.parquet", "/mbd/orders/b.parquet/", "/mbd/trades////a.parquet",
+	                                   "mbd/trades/b.parquet///"};
+	for (const auto &oid : oid_list) {
+		duckdb::CephPath object_path {TEST_NAMESPACE, oid};
+		auto write_ret = connector->Write(oid, TEST_NAMESPACE.pool, TEST_NAMESPACE.ns, data.c_str(), data.length());
+		ASSERT_EQ(write_ret, data.length());
+	}
+
+	CheckIndex(".ceph_index", {"/", "mbd/"});
+	CheckIndex("mbd/.ceph_index", {"/", "trades/"});
+	CheckIndex("mbd/trades/.ceph_index", {"b.parquet/"});
+	CheckIndex("mbd/trades/b.parquet/.ceph_index", {"/"});
+	CheckIndex("mbd/trades/b.parquet//.ceph_index", {"/"});
+	CheckIndex("mbd//.ceph_index", {"orders/"});
+	CheckIndex("mbd//orders/.ceph_index", {"a.parquet"});
+	CheckIndex("/.ceph_index", {"mbd/"});
+	CheckIndex("/mbd/.ceph_index", {"orders/", "trades/"});
+	CheckIndex("/mbd/orders/.ceph_index", {"b.parquet/"});
+	CheckIndex("/mbd/trades/.ceph_index", {"/"});
+	CheckIndex("/mbd/trades//.ceph_index", {"/"});
+	CheckIndex("/mbd/trades///.ceph_index", {"/"});
+	CheckIndex("/mbd/trades////.ceph_index", {"a.parquet"});
+
+	auto files_list = connector->ListFiles("", TEST_NAMESPACE.pool, TEST_NAMESPACE.ns);
+
+	std::set<std::string> file_names;
+	for (const auto &f : files_list) {
+		file_names.insert(f);
+	}
+
+	std::set<std::string> expected_file_names {"mbd//orders/a.parquet", "/mbd/orders/b.parquet/",
+	                                           "/mbd/trades////a.parquet", "mbd/trades/b.parquet///"};
 	ASSERT_EQ(expected_file_names, file_names);
 }
 

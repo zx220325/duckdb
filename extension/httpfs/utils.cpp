@@ -34,13 +34,11 @@ Path::Path(const char *raw) noexcept : components {} {
 	std::string current_component;
 	for (auto raw_ptr = raw; *raw_ptr; ++raw_ptr) {
 		auto ch = *raw_ptr;
+		current_component.push_back(ch);
+
 		if (ch == PATH_SEPARATOR) {
-			if (!current_component.empty()) {
-				components.push_back(std::move(current_component));
-				current_component.clear();
-			}
-		} else {
-			current_component.push_back(ch);
+			components.push_back(std::move(current_component));
+			current_component.clear();
 		}
 	}
 
@@ -61,13 +59,12 @@ std::string Path::GetFileName() const noexcept {
 }
 
 Path Path::GetBase() const noexcept {
-	if (IsRoot()) {
+	if (IsEmpty()) {
 		return Path {};
 	}
 
-	Path ret;
-	ret.components.resize(components.size() - 1);
-	std::copy(components.begin(), components.end() - 1, ret.components.begin());
+	Path ret = *this;
+	ret.components.pop_back();
 
 	return ret;
 }
@@ -87,7 +84,7 @@ void Path::Pop() noexcept {
 std::string Path::ToString() const noexcept {
 	std::ostringstream builder;
 	for (const auto &c : components) {
-		builder << PATH_SEPARATOR << c;
+		builder << c;
 	}
 	return builder.str();
 }

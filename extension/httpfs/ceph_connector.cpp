@@ -132,7 +132,7 @@ public:
 				return;
 			}
 
-			if (!recurse_parent || update_entry.first.path == "/") {
+			if (!recurse_parent || update_entry.first.path.empty()) {
 				continue;
 			}
 

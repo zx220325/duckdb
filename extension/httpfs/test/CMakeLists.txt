@@ -9,7 +9,7 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(googletest benchmark)
 
-add_executable(ceph_test ceph.cpp)
+add_executable(ceph_test ceph.cpp path.cpp)
 target_link_libraries(ceph_test httpfs_extension GTest::gtest_main)
 
 add_executable(ceph_bench_setup ceph_bench_setup.cpp)

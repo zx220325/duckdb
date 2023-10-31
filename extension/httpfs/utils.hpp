@@ -24,7 +24,7 @@ public:
     explicit Path(const char *raw) noexcept;
     explicit Path(const std::string &raw) noexcept;
 
-    bool IsRoot() const noexcept { return components.empty(); }
+    bool IsEmpty() const noexcept { return components.empty(); }
 
     std::string GetFileName() const noexcept;
 
@@ -36,6 +36,8 @@ public:
     void Pop() noexcept;
 
     std::string ToString() const noexcept;
+
+    const std::vector<std::string> &GetComponents() const noexcept { return components; }
 
     friend bool operator==(const Path &lhs, const Path &rhs) noexcept;
     friend bool operator!=(const Path &lhs, const Path &rhs) noexcept;
