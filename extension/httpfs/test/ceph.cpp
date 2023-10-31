@@ -290,15 +290,10 @@ TEST_F(CephConnectorTest, ListFilesNoIndex) {
 		ASSERT_FALSE(ec);
 	}
 
+	// Without index, no files could be listed using the ListFiles interface.
+
 	auto files_list = connector->ListFiles("/mbd/or", TEST_NAMESPACE.pool, TEST_NAMESPACE.ns);
-
-	std::set<std::string> file_names;
-	for (const auto &f : files_list) {
-		file_names.insert(f);
-	}
-
-	std::set<std::string> expected_file_names {"/mbd/orders/a.parquet", "/mbd/orders/b.parquet"};
-	ASSERT_EQ(expected_file_names, file_names);
+	ASSERT_TRUE(files_list.empty());
 }
 
 TEST_F(CephConnectorTest, ListFilesAfterDelete) {

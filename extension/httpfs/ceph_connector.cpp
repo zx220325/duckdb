@@ -69,31 +69,6 @@ struct FileMetaCache {
 	}
 };
 
-std::optional<std::chrono::time_point<UtcClock>> DeserializeUtcTimePoint(const librados::bufferlist &buffer) noexcept {
-	if (buffer.length() != sizeof(typename UtcClock::rep)) {
-		return std::nullopt;
-	}
-
-	typename UtcClock::rep count;
-	char *ptr = reinterpret_cast<char *>(&count);
-
-	for (const auto &buf : buffer.buffers()) {
-		std::memcpy(ptr, buf.c_str(), buf.length());
-		ptr += buf.length();
-	}
-
-	return std::chrono::time_point<UtcClock> {UtcClock::duration {count}};
-}
-
-librados::bufferlist SerializeUtcTimePoint(std::chrono::time_point<UtcClock> tm) noexcept {
-	std::uint64_t count = tm.time_since_epoch().count();
-
-	librados::bufferlist buffer;
-	buffer.append(reinterpret_cast<const char *>(&count), sizeof(count));
-
-	return buffer;
-}
-
 bool IsPrefix(const std::string &prefix, const std::string &s) {
 	if (prefix.length() > s.length()) {
 		return false;
@@ -116,7 +91,7 @@ public:
 	void InsertOrUpdate(const std::vector<CephPath> &paths, std::error_code &ec) {
 		// Collect updates for each object directory.
 		auto query_time = UtcClock::now();
-		std::map<CephPath, std::map<std::string, std::chrono::time_point<UtcClock>>, std::greater<CephPath>> updates;
+		std::map<CephPath, std::map<std::string, IndexValue>, std::greater<CephPath>> updates;
 
 		for (const auto &p : paths) {
 			Path oid_path {p.path};
@@ -124,7 +99,7 @@ public:
 			auto object_dir = oid_path.GetBase();
 			CephPath dir_path {p.ns, object_dir.ToString()};
 
-			updates[dir_path].emplace(std::move(object_name), query_time);
+			updates[dir_path].emplace(std::move(object_name), IndexValue {false, query_time});
 		}
 
 		// Apply the updates.
@@ -146,8 +121,7 @@ public:
 					return false;
 				}
 
-				raw.SetOmapKv<std::chrono::time_point<UtcClock>>(index_path, update_entry.second,
-				                                                 &SerializeUtcTimePoint, ec);
+				raw.SetOmapKv<IndexValue>(index_path, update_entry.second, &IndexValue::Serialize, ec);
 				if (ec) {
 					return false;
 				}
@@ -167,7 +141,7 @@ public:
 			auto dir_name = dir_path.GetFileName();
 
 			CephPath parent_dir_path {update_entry.first.ns, parent_dir};
-			updates[parent_dir_path].emplace(std::move(dir_name), query_time);
+			updates[parent_dir_path].emplace(std::move(dir_name), IndexValue {true, query_time});
 		}
 	}
 
@@ -212,41 +186,24 @@ public:
 			auto index_oid = next_to_pull / CEPH_INDEX_FILE;
 
 			std::error_code ec;
-			auto index_omap_kv = raw.GetOmapKv<std::chrono::time_point<UtcClock>>(
-			    CephPath {prefix.ns, index_oid.ToString()}, {}, &DeserializeUtcTimePoint, ec);
+			auto index_omap_kv =
+			    raw.GetOmapKv<IndexValue>(CephPath {prefix.ns, index_oid.ToString()}, {}, &IndexValue::Deserialize, ec);
 			if (ec) {
 				index_omap_kv = {};
 			}
 
-			if (index_omap_kv.empty()) {
-				auto object_names = ListObjectsDirect(CephPath {prefix.ns, next_to_pull.ToString()}, ec);
-				if (ec) {
-					continue;
-				}
-				for (auto &name : object_names) {
-					if (IsPrefix(prefix.path, name)) {
-						files.push_back(std::move(name));
-					}
-				}
-				continue;
-			}
-
-			for (auto &[component, tm] : index_omap_kv) {
+			for (auto &[component, index_value] : index_omap_kv) {
 				auto next_level_path = next_to_pull / component;
 				auto next_level_path_str = next_level_path.ToString();
 				if (!IsPrefix(prefix.path, next_level_path_str)) {
 					continue;
 				}
 
-				if (raw.Exist(CephPath {prefix.ns, next_level_path.ToString()}, ec) && !ec) {
+				if (index_value.is_dir) {
+					pull_queue.push(std::move(next_level_path));
+				} else {
 					files.push_back(next_level_path.ToString());
-					continue;
 				}
-				if (ec) {
-					continue;
-				}
-
-				pull_queue.push(std::move(next_level_path));
 			}
 		}
 
@@ -260,8 +217,8 @@ public:
 		index_path.Push(CEPH_INDEX_FILE);
 
 		std::set<std::string> keys {object_name};
-		auto index_kv = raw.GetOmapKv<std::chrono::time_point<UtcClock>>(CephPath {path.ns, index_path.ToString()},
-		                                                                 keys, &DeserializeUtcTimePoint, ec);
+		auto index_kv =
+		    raw.GetOmapKv<IndexValue>(CephPath {path.ns, index_path.ToString()}, keys, &IndexValue::Deserialize, ec);
 		if (ec) {
 			return {};
 		}
@@ -273,7 +230,7 @@ public:
 		}
 
 		ec = std::error_code {};
-		return it->second;
+		return it->second.modified_time;
 	}
 
 	void Refresh(const CephNamespace &ns, std::error_code &ec) {
@@ -292,6 +249,46 @@ public:
 	}
 
 private:
+	struct IndexValue {
+		static IndexValue Unpack(std::uint64_t value) noexcept {
+			auto is_dir = (value & 1) != 0;
+			typename std::chrono::time_point<UtcClock>::duration dur {value >> 1};
+			return {is_dir, std::chrono::time_point<UtcClock> {dur}};
+		}
+
+		static std::optional<IndexValue> Deserialize(const librados::bufferlist &buffer) noexcept {
+			std::uint64_t packed;
+			if (buffer.length() != sizeof(packed)) {
+				return std::nullopt;
+			}
+
+			char *ptr = reinterpret_cast<char *>(&packed);
+			for (const auto &buf : buffer.buffers()) {
+				std::memcpy(ptr, buf.c_str(), buf.length());
+				ptr += buf.length();
+			}
+
+			return Unpack(packed);
+		}
+
+		bool is_dir;
+		std::chrono::time_point<UtcClock> modified_time;
+
+		std::uint64_t Pack() const noexcept {
+			return (static_cast<std::uint64_t>(modified_time.time_since_epoch().count()) << 1) |
+			       static_cast<std::uint64_t>(is_dir);
+		}
+
+		librados::bufferlist Serialize() const noexcept {
+			auto packed = Pack();
+
+			librados::bufferlist buffer;
+			buffer.append(reinterpret_cast<const char *>(&packed), sizeof(packed));
+
+			return buffer;
+		}
+	};
+
 	RawCephConnector &raw;
 
 	std::vector<std::string> ListObjectsDirect(const CephPath &prefix, std::error_code &ec) {
@@ -534,9 +531,9 @@ int64_t CephConnector::Write(const std::string &path, const std::string &pool, c
 			    c.read_cache_start_offset =
 			        buffer_in_len >= FileMetaCache::READ_CACHE_LEN ? buffer_in_len - FileMetaCache::READ_CACHE_LEN : 0;
 
-				std::size_t cache_size = buffer_in_len - c.read_cache_start_offset;
-				c.read_cache.reset(new char[cache_size]);
-				std::memcpy(c.read_cache.get(), buffer_in, cache_size);
+			    std::size_t cache_size = buffer_in_len - c.read_cache_start_offset;
+			    c.read_cache.reset(new char[cache_size]);
+			    std::memcpy(c.read_cache.get(), buffer_in, cache_size);
 		    },
 		    ec);
 		if (ec) {
