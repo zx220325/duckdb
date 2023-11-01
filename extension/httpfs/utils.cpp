@@ -1,6 +1,7 @@
 #include "utils.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
@@ -25,8 +26,9 @@ typename UtcClock::time_point UtcClock::now() noexcept { // NOLINT
 		std::abort();
 	}
 
-	std::uint64_t count = static_cast<std::uint64_t>(tm.tv_sec) + static_cast<std::uint64_t>(tm.tv_usec) * 1'000'000;
-	duration dur {count};
+	std::uint64_t usec_count =
+	    static_cast<std::uint64_t>(tm.tv_sec) * 1'000'000 + static_cast<std::uint64_t>(tm.tv_usec);
+	std::chrono::microseconds dur {usec_count};
 	return time_point {dur};
 }
 
