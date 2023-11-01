@@ -18,6 +18,7 @@
 #include <string>
 #include <system_error>
 #include <tuple>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -519,7 +520,8 @@ std::vector<std::string> RawCephConnector::ListFilesAndTransform(
 
 	ec = std::error_code {};
 
-	std::vector<std::string> names;
+	// use unordered_set to reduce memory usage, for radosstriper, a 400M file will be splited to 100 * 4M.
+	std::unordered_set<std::string> names;
 	auto range_begin = ctx->io_ctx->nobjects_begin();
 	auto range_end = ctx->io_ctx->nobjects_end();
 	for (auto it = range_begin; it != range_end; ++it) {
@@ -530,14 +532,14 @@ std::vector<std::string> RawCephConnector::ListFilesAndTransform(
 		auto object_name = it->get_oid();
 		auto transformed_object_name = transform(std::move(object_name), ec);
 		if (ec) {
-			return names;
+			return {names.begin(), names.end()};
 		}
 		if (transformed_object_name.has_value()) {
-			names.push_back(std::move(transformed_object_name.value()));
+			names.emplace(std::move(transformed_object_name.value()));
 		}
 	}
 
-	return names;
+	return {names.begin(), names.end()};
 }
 
 std::map<std::string, librados::bufferlist>

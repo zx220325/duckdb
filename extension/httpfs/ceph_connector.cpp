@@ -234,7 +234,27 @@ public:
 	}
 
 	void Refresh(const CephNamespace &ns, std::error_code &ec) {
-		auto object_names = ListObjectsDirect(CephPath {ns, ""}, ec);
+		constexpr size_t CEPH_INDEX_LEN = std::strlen(CEPH_INDEX_FILE);
+		auto object_names = raw.ListFilesAndTransform(
+		    ns,
+		    [](const std::string &oid, std::error_code &ec) -> std::optional<std::string> {
+			    constexpr std::size_t CEPH_OBJ_SUFFIX_LENGTH = std::size(CEPH_OBJ_SUFFIX) - 1;
+			    if (oid.find(CEPH_INDEX_FILE, oid.size() - CEPH_INDEX_LEN) != std::string::npos) {
+				    return oid;
+			    }
+
+			    if (oid.size() < CEPH_OBJ_SUFFIX_LENGTH) {
+				    return std::nullopt;
+			    }
+
+			    const auto pos = oid.size() - CEPH_OBJ_SUFFIX_LENGTH;
+			    if (oid.find(CEPH_OBJ_SUFFIX, pos) != std::string::npos) {
+				    return oid.substr(0, pos);
+			    }
+
+			    return std::nullopt;
+		    },
+		    ec);
 		if (ec) {
 			return;
 		}
@@ -242,7 +262,14 @@ public:
 		std::vector<CephPath> object_paths;
 		object_paths.reserve(object_names.size());
 		for (auto &name : object_names) {
-			object_paths.push_back(CephPath {ns, std::move(name)});
+			if (name.find(CEPH_INDEX_FILE, name.size() - CEPH_INDEX_LEN) != std::string::npos) {
+				raw.RadosDelete(CephPath {ns, std::move(name)}, ec);
+				if (ec) {
+					return;
+				}
+			} else {
+				object_paths.push_back(CephPath {ns, std::move(name)});
+			}
 		}
 
 		InsertOrUpdate(object_paths, ec);
@@ -580,11 +607,12 @@ std::time_t CephConnector::GetLastModifiedTime(const std::string &path, const st
 	return std::chrono::duration_cast<std::chrono::seconds>(modified_time.time_since_epoch()).count();
 }
 
-void CephConnector::RefreshFileIndex(const std::string &pool, const std::string &ns) {
+bool CephConnector::RefreshFileIndex(const std::string &pool, const std::string &ns) {
 	CephNamespace key {pool, ns};
 
 	std::error_code ec;
 	index_manager->Refresh(key, ec);
+	return !ec;
 }
 
 void CephConnector::ClearCache() {

@@ -35,7 +35,7 @@ public:
 
 	std::time_t GetLastModifiedTime(const std::string &path, const std::string &pool, const std::string &ns);
 
-	void RefreshFileIndex(const std::string &pool, const std::string &ns);
+	bool RefreshFileIndex(const std::string &pool, const std::string &ns);
 
 	void ClearCache();
 	void DisableCache();

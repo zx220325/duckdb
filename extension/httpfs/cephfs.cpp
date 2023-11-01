@@ -246,16 +246,16 @@ bool CephFileSystem::CanHandleFile(const string &fpath) {
 
 bool CephFileSystem::ListFiles(const string &directory, const std::function<void(const string &, bool)> &callback,
                                FileOpener *opener) {
-	if (directory == "ceph://persist_index") {
-		return true;
-	}
-
 	auto &&cs = CephConnector::GetSingleton();
 	string path, pool, ns;
 	ParseUrl(directory, pool, ns, path);
 
 	if (path == "refresh_index") {
-		cs.RefreshFileIndex(pool, ns);
+		if (cs.RefreshFileIndex(pool, ns)) {
+			callback("success", false);
+		} else {
+			callback("failed", false);
+		}
 		return true;
 	}
 	for (auto &object : cs.ListFiles(path, pool, ns)) {
