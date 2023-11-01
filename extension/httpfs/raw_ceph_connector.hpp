@@ -73,6 +73,8 @@ public:
 
 	~RawCephConnector() noexcept = default;
 
+	void Connect();
+
 	RawCephConnector &operator=(const RawCephConnector &) = delete;
 	RawCephConnector &operator=(RawCephConnector &&) = delete;
 

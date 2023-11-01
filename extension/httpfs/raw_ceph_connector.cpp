@@ -238,6 +238,10 @@ struct RawCephConnector::RadosContext {
 };
 
 RawCephConnector::RawCephConnector() : cluster {} {
+	Connect();
+}
+
+void RawCephConnector::Connect() {
 	if (GetJdfsUsername().empty()) {
 		throw std::runtime_error("can not find JDFS_USERNAME in environment variable");
 	}
@@ -368,7 +372,8 @@ std::size_t RawCephConnector::Read(const CephPath &path, std::uint64_t file_offs
 
 		std::size_t bytes_read_this_time = 0;
 		for (auto &buf : bl.buffers()) {
-			std::memcpy(reinterpret_cast<char *>(buffer) + bytes_read, buf.c_str(), buf.length());
+			std::memcpy(reinterpret_cast<char *>(buffer) + bytes_read + bytes_read_this_time, buf.c_str(),
+			            buf.length());
 			bytes_read_this_time += buf.length();
 		}
 

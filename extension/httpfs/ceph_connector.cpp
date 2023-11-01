@@ -384,8 +384,9 @@ CephConnector &CephConnector::GetSingleton() {
 		current_pid = cur_pid;
 
 		// After forking, re-initialize the global CephConnector object.
-		INSTANCE.~CephConnector();
-		new (&INSTANCE) CephConnector {};
+		// INSTANCE.~CephConnector();
+		// new (&INSTANCE) CephConnector {};
+		INSTANCE.GetRawConnector()->Connect();
 	}
 
 	return INSTANCE;
