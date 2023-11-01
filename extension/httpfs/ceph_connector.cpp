@@ -77,6 +77,15 @@ bool IsPrefix(const std::string &prefix, const std::string &s) {
 	return std::equal(prefix.begin(), prefix.end(), s.begin());
 }
 
+bool IsSuffix(const std::string &suffix, const std::string &s) {
+	if (suffix.length() > s.length()) {
+		return false;
+	}
+
+	auto start_offset = s.length() - suffix.length();
+	return std::equal(suffix.begin(), suffix.end(), s.begin() + start_offset);
+}
+
 } // namespace
 
 class CephConnector::FileIndexManager {
@@ -234,28 +243,7 @@ public:
 	}
 
 	void Refresh(const CephNamespace &ns, std::error_code &ec) {
-		constexpr size_t CEPH_INDEX_LEN = std::strlen(CEPH_INDEX_FILE);
-		auto object_names = raw.ListFilesAndTransform(
-		    ns,
-		    [this, &ns](const std::string &oid, std::error_code &ec) -> std::optional<std::string> {
-			    constexpr std::size_t CEPH_OBJ_SUFFIX_LENGTH = std::size(CEPH_OBJ_SUFFIX) - 1;
-			    if (oid.find(CEPH_INDEX_FILE, oid.size() - CEPH_INDEX_LEN) != std::string::npos) {
-				    raw.RadosDelete(CephPath {ns, oid}, ec);
-				    return std::nullopt;
-			    }
-
-			    if (oid.size() < CEPH_OBJ_SUFFIX_LENGTH) {
-				    return std::nullopt;
-			    }
-
-			    const auto pos = oid.size() - CEPH_OBJ_SUFFIX_LENGTH;
-			    if (oid.find(CEPH_OBJ_SUFFIX, pos) != std::string::npos) {
-				    return oid.substr(0, pos);
-			    }
-
-			    return std::nullopt;
-		    },
-		    ec);
+		auto object_names = ListObjectsDirect(ns, ec);
 		if (ec) {
 			return;
 		}
@@ -312,16 +300,20 @@ private:
 
 	RawCephConnector &raw;
 
-	std::vector<std::string> ListObjectsDirect(const CephPath &prefix, std::error_code &ec) {
+	std::vector<std::string> ListObjectsDirect(const CephNamespace &ns, std::error_code &ec) {
 		return raw.ListFilesAndTransform(
-		    prefix.ns,
-		    [](const std::string &oid, std::error_code &ec) -> std::optional<std::string> {
-			    constexpr std::size_t CEPH_OBJ_SUFFIX_LENGTH = std::size(CEPH_OBJ_SUFFIX) - 1;
-			    if (oid.size() < CEPH_OBJ_SUFFIX_LENGTH) {
+		    ns,
+		    [this, &ns](const std::string &oid, std::error_code &ec) -> std::optional<std::string> {
+			    // Skip ceph index files when enumerating files.
+			    constexpr size_t CEPH_INDEX_LEN = std::size(CEPH_INDEX_FILE) - 1;
+			    if (oid.find(CEPH_INDEX_FILE, oid.size() - CEPH_INDEX_LEN) != std::string::npos) {
+				    raw.RadosDelete(CephPath {ns, oid}, ec);
 				    return std::nullopt;
 			    }
 
-			    const auto pos = oid.size() - CEPH_OBJ_SUFFIX_LENGTH;
+			    // Skip files that are not created by libradosstriper when enumerating files.
+			    constexpr std::size_t CEPH_OBJ_SUFFIX_LENGTH = std::size(CEPH_OBJ_SUFFIX) - 1;
+			    auto pos = oid.size() - CEPH_OBJ_SUFFIX_LENGTH;
 			    if (oid.find(CEPH_OBJ_SUFFIX, pos) != std::string::npos) {
 				    return oid.substr(0, pos);
 			    }
