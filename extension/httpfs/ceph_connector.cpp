@@ -237,10 +237,11 @@ public:
 		constexpr size_t CEPH_INDEX_LEN = std::strlen(CEPH_INDEX_FILE);
 		auto object_names = raw.ListFilesAndTransform(
 		    ns,
-		    [](const std::string &oid, std::error_code &ec) -> std::optional<std::string> {
+		    [this, &ns](const std::string &oid, std::error_code &ec) -> std::optional<std::string> {
 			    constexpr std::size_t CEPH_OBJ_SUFFIX_LENGTH = std::size(CEPH_OBJ_SUFFIX) - 1;
 			    if (oid.find(CEPH_INDEX_FILE, oid.size() - CEPH_INDEX_LEN) != std::string::npos) {
-				    return oid;
+				    raw.RadosDelete(CephPath {ns, oid}, ec);
+				    return std::nullopt;
 			    }
 
 			    if (oid.size() < CEPH_OBJ_SUFFIX_LENGTH) {
@@ -262,14 +263,7 @@ public:
 		std::vector<CephPath> object_paths;
 		object_paths.reserve(object_names.size());
 		for (auto &name : object_names) {
-			if (name.find(CEPH_INDEX_FILE, name.size() - CEPH_INDEX_LEN) != std::string::npos) {
-				raw.RadosDelete(CephPath {ns, std::move(name)}, ec);
-				if (ec) {
-					return;
-				}
-			} else {
-				object_paths.push_back(CephPath {ns, std::move(name)});
-			}
+			object_paths.push_back(CephPath {ns, std::move(name)});
 		}
 
 		InsertOrUpdate(object_paths, ec);
