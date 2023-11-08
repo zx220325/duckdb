@@ -77,15 +77,6 @@ bool IsPrefix(const std::string &prefix, const std::string &s) {
 	return std::equal(prefix.begin(), prefix.end(), s.begin());
 }
 
-bool IsSuffix(const std::string &suffix, const std::string &s) {
-	if (suffix.length() > s.length()) {
-		return false;
-	}
-
-	auto start_offset = s.length() - suffix.length();
-	return std::equal(suffix.begin(), suffix.end(), s.begin() + start_offset);
-}
-
 } // namespace
 
 class CephConnector::FileIndexManager {
@@ -547,7 +538,7 @@ int64_t CephConnector::Write(const std::string &path, const std::string &pool, c
 
 			    std::size_t cache_size = buffer_in_len - c.read_cache_start_offset;
 			    c.read_cache.reset(new char[cache_size]);
-			    std::memcpy(c.read_cache.get(), buffer_in, cache_size);
+			    std::memcpy(c.read_cache.get(), buffer_in + c.read_cache_start_offset, cache_size);
 		    },
 		    ec);
 		if (ec) {

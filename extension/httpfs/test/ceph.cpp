@@ -3,7 +3,10 @@
 
 #include <cerrno>
 #include <chrono>
+#include <cstdint>
+#include <cstring>
 #include <gtest/gtest.h>
+#include <random>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -13,7 +16,15 @@
 
 namespace {
 
-static const duckdb::CephNamespace TEST_NAMESPACE {"tech_test", "datacore_test_ns"};
+const duckdb::CephNamespace TEST_NAMESPACE {"tech_test", "datacore_test_ns"};
+
+void FillRandomBytes(char *buffer, std::size_t buffer_size) noexcept {
+	std::minstd_rand engine(std::chrono::high_resolution_clock::now().time_since_epoch().count());
+	std::uniform_int_distribution<std::uint8_t> byte_dist;
+	for (std::size_t i = 0; i < buffer_size; ++i) {
+		buffer[i] = static_cast<char>(byte_dist(engine));
+	}
+}
 
 } // namespace
 
@@ -82,6 +93,30 @@ TEST_F(CephConnectorTest, WriteAndRead) {
 	ret = connector->Read(oid, TEST_NAMESPACE.pool, TEST_NAMESPACE.ns, 0, buffer.data(), buffer.length());
 	ASSERT_EQ(ret, buffer.length());
 	ASSERT_EQ(buffer, data);
+}
+
+TEST_F(CephConnectorTest, WriteAndReadLargeFile) {
+	constexpr std::size_t FILE_SIZE = 1024 * 1024; // 1MB file.
+
+	std::string oid = "/test.parquet";
+	std::string data(FILE_SIZE, 0);
+	FillRandomBytes(data.data(), data.length());
+
+	std::error_code ec;
+	auto ret = connector->Write(oid, TEST_NAMESPACE.pool, TEST_NAMESPACE.ns, data.c_str(), data.length());
+	ASSERT_EQ(ret, data.length());
+
+	constexpr std::size_t READ_SIZE = 64;
+	static_assert(READ_SIZE <= FILE_SIZE);
+
+	std::string buffer(READ_SIZE, 0);
+	auto read_offset = FILE_SIZE - READ_SIZE;
+	ret = connector->Read(oid, TEST_NAMESPACE.pool, TEST_NAMESPACE.ns, read_offset, buffer.data(),
+	                      buffer.length());
+	ASSERT_EQ(ret, buffer.length());
+
+	auto cmp = std::memcmp(buffer.data(), data.data() + read_offset, READ_SIZE);
+	ASSERT_EQ(cmp, 0);
 }
 
 TEST_F(CephConnectorTest, OverwriteAndRead) {
