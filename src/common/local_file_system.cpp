@@ -281,7 +281,7 @@ unique_ptr<FileHandle> LocalFileSystem::OpenFile(const string &path_p, uint8_t f
 	ufh_impl->last_modified = s.st_mtime;
 	auto ufh = make_uniq<UnixFileHandle>(*this, path, std::move(ufh_impl));
 
-	return ufh;
+	return std::move(ufh);
 }
 
 void LocalFileSystem::SetFilePointer(FileHandle &handle, idx_t location) {
