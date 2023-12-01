@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-
+import logging
 import os
 import sys
 import platform
@@ -110,9 +110,12 @@ def parallel_cpp_compile(
 
 # speed up compilation with: -j = cpu_number() on non Windows machines
 if os.name != 'nt' and os.environ.get('DUCKDB_DISABLE_PARALLEL_COMPILE', '') != '1':
-    import distutils.ccompiler
-
-    distutils.ccompiler.CCompiler.compile = parallel_cpp_compile
+    try:
+        from pybind11.setup_helpers import ParallelCompile
+    except ImportError:
+        logging.warning('Pybind11 not available yet')
+    else:
+        ParallelCompile().install()
 
 
 def open_utf8(fpath, flags):
@@ -183,6 +186,8 @@ if 'BUILD_HTTPFS' in os.environ:
 
 for ext in extensions:
     toolchain_args.extend(['-DDUCKDB_EXTENSION_{}_LINKED'.format(ext.upper())])
+
+toolchain_args.extend(['-DDUCKDB_EXTENSION_AUTOLOAD_DEFAULT=1', '-DDUCKDB_EXTENSION_AUTOINSTALL_DEFAULT=1'])
 
 
 class get_pybind_include(object):
@@ -352,16 +357,21 @@ data_files = setup_data_files(extra_files + header_files)
 packages = [
     lib_name,
     'duckdb.typing',
+    'duckdb.query_graph',
     'duckdb.functional',
-    'pyduckdb',
-    'pyduckdb.value',
+    'duckdb.value',
     'duckdb-stubs',
     'duckdb-stubs.functional',
     'duckdb-stubs.typing',
     'adbc_driver_duckdb',
 ]
 
-spark_packages = ['pyduckdb.spark', 'pyduckdb.spark.sql']
+spark_packages = [
+    'duckdb.experimental.spark',
+    'duckdb.experimental.spark.sql',
+    'duckdb.experimental.spark.errors',
+    'duckdb.experimental.spark.errors.exceptions',
+]
 
 packages.extend(spark_packages)
 
