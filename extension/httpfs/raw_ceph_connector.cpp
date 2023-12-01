@@ -466,15 +466,12 @@ void RawCephConnector::Delete(const CephPath &path, std::error_code &ec) noexcep
 
 	if (auto ret = ctx->striper->remove(path.path); ret < 0) {
 		// Cannot delete through libradosstriper. Try force delete through librados.
-		auto ret1 = ctx->striper->remove(path.path);
-		auto ret2 = ctx->striper->remove(path.path + CEPH_OBJ_SUFFIX);
-		if (ret1 < 0 || ret2 < 0) {
-			auto err_code = ret1 < 0 ? -ret1 : -ret2;
-			ec = RadosErrorCategory::GetErrorCode(err_code);
+		ret = ctx->io_ctx->remove(path.path + CEPH_OBJ_SUFFIX);
+		if (ret < 0) {
+			ec = RadosErrorCategory::GetErrorCode(ret);
 			return;
 		}
 	}
-
 	ec = std::error_code {};
 }
 
