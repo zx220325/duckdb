@@ -9,8 +9,8 @@
 #include "duckdb/common/thread.hpp"
 #endif
 
-#include <cstdio>
 #include <cinttypes>
+#include <cstdio>
 
 namespace duckdb {
 
@@ -308,9 +308,11 @@ idx_t CGroupBandwidthQuota(idx_t physical_cores, FileSystem &fs) {
 	}
 }
 
+static const bool is_slurm = getenv("SLURM_JOB_ID") != nullptr;
+
 idx_t DBConfig::GetSystemMaxThreads(FileSystem &fs) {
 #ifndef DUCKDB_NO_THREADS
-	idx_t physical_cores = std::thread::hardware_concurrency();
+	idx_t physical_cores = is_slurm ? 1 : std::thread::hardware_concurrency();
 #ifdef __linux__
 	auto cores_available_per_period = CGroupBandwidthQuota(physical_cores, fs);
 	return MaxValue<idx_t>(cores_available_per_period, 1);
