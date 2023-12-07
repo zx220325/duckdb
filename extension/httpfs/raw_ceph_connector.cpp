@@ -430,21 +430,6 @@ std::size_t RawCephConnector::Write(const CephPath &path, const void *buffer, st
 		}
 	}
 
-	// Set object's size, to make it compatiable with JDFS.
-	ceph::bufferlist bl;
-	bl.append("0.1");
-	if (auto ret = ctx->striper->setxattr(path.path, "_version", bl); ret < 0) {
-		ec = RadosErrorCategory::GetErrorCode(-ret);
-		return 0;
-	}
-
-	bl.clear();
-	bl.append(std::to_string(buffer_size));
-	if (auto ret = ctx->striper->setxattr(path.path, "_size", bl); ret < 0) {
-		ec = RadosErrorCategory::GetErrorCode(-ret);
-		return 0;
-	}
-
 	ec = std::error_code {};
 	return buffer_size;
 }
@@ -454,9 +439,6 @@ void RawCephConnector::Delete(const CephPath &path, std::error_code &ec) noexcep
 	if (ec) {
 		return;
 	}
-
-	ctx->striper->rmxattr(path.path, "_version");
-	ctx->striper->rmxattr(path.path, "_size");
 
 	if (auto ret = ctx->striper->remove(path.path); ret < 0) {
 		// Cannot delete through libradosstriper. Try force delete through librados.
