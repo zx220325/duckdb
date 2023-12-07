@@ -390,21 +390,15 @@ std::size_t RawCephConnector::Read(const CephPath &path, std::uint64_t file_offs
 
 std::size_t RawCephConnector::Write(const CephPath &path, const void *buffer, std::size_t buffer_size,
                                     std::error_code &ec) noexcept {
-	// Delete the object if it already exists. If either the Exist operation or the Delete operation fails, this Write
-	// operation will also fail.
-	if (Exist(path, ec)) {
-		D_ASSERT(!ec);
-		Delete(path, ec);
-	}
-	if (ec) {
-		return 0;
-	}
-
 	auto ctx = RadosContext::Create(cluster, path.ns, ec);
 	if (ec) {
 		return 0;
 	}
-
+	int rc = ctx->striper->trunc(path.path, 0);
+	if (rc && rc != -ENOENT) {
+		ec = RadosErrorCategory::GetErrorCode(-rc);
+		return 0;
+	}
 	std::vector<std::unique_ptr<librados::AioCompletion>> completions;
 	completions.reserve((buffer_size + IO_SPLIT_SIZE - 1) / IO_SPLIT_SIZE);
 
