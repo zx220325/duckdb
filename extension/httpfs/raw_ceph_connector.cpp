@@ -10,13 +10,16 @@
 #include <chrono>
 #include <cstddef>
 #include <cstring>
+#include <iostream>
 #include <limits>
+#include <list>
 #include <memory>
 #include <optional>
 #include <set>
 #include <sstream>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <tuple>
 #include <unordered_set>
 #include <utility>
@@ -388,15 +391,71 @@ std::size_t RawCephConnector::Read(const CephPath &path, std::uint64_t file_offs
 	return bytes_read;
 }
 
+void RawCephConnector::BusyWaitBreakRetry(const CephPath &path, const RadosContext &ctx,
+                                          std::function<int(const CephPath &, const RadosContext &)> func,
+                                          std::error_code &ec) noexcept {
+
+	ec = std::error_code {};
+	int ret;
+	// wait 10s for break lock
+	for (int i = 0; i < 10; i++) {
+		std::this_thread::sleep_for(std::chrono::seconds(1));
+		ret = func(path, ctx);
+		if (ret == 0) {
+			return;
+		} else if (ret != -EBUSY) {
+			ec = RadosErrorCategory::GetErrorCode(-ret);
+			return;
+		}
+	}
+
+	int exclusive;
+	std::string tag;
+	std::list<librados::locker_t> lockers;
+	ret = ctx.io_ctx->list_lockers(path.path + CEPH_OBJ_SUFFIX, "striper.lock", &exclusive, &tag, &lockers);
+	if (ret < 0) {
+		ec = RadosErrorCategory::GetErrorCode(-ret);
+		return;
+	}
+	for (auto &&locker : lockers) {
+		ret = ctx.io_ctx->break_lock(path.path + CEPH_OBJ_SUFFIX, "striper.lock", locker.client, locker.cookie);
+		if (ret < 0) {
+			ec = RadosErrorCategory::GetErrorCode(-ret);
+			return;
+		}
+	}
+	ret = func(path, ctx);
+	if (ret < 0) {
+		ec = RadosErrorCategory::GetErrorCode(-ret);
+		return;
+	}
+}
+
 std::size_t RawCephConnector::Write(const CephPath &path, const void *buffer, std::size_t buffer_size,
                                     std::error_code &ec) noexcept {
+	ec = std::error_code {};
 	auto ctx = RadosContext::Create(cluster, path.ns, ec);
 	if (ec) {
 		return 0;
 	}
-	int rc = ctx->striper->trunc(path.path, 0);
-	if (rc && rc != -ENOENT) {
-		ec = RadosErrorCategory::GetErrorCode(-rc);
+	int ret = ctx->striper->trunc(path.path, 0);
+	switch (ret) {
+	case -EBUSY:
+		BusyWaitBreakRetry(
+		    path, *ctx,
+		    [](const CephPath &path, const RadosContext &ctx) -> int { return ctx.striper->trunc(path.path, 0); }, ec);
+		if (ec) {
+			ret = ctx->io_ctx->remove(path.path + CEPH_OBJ_SUFFIX);
+			if (ret < 0) {
+				ec = RadosErrorCategory::GetErrorCode(-ret);
+				return 0;
+			}
+		}
+		break;
+	case -ENOENT:
+		break;
+	default:
+		ec = RadosErrorCategory::GetErrorCode(-ret);
 		return 0;
 	}
 	std::vector<std::unique_ptr<librados::AioCompletion>> completions;
@@ -435,20 +494,51 @@ std::size_t RawCephConnector::Write(const CephPath &path, const void *buffer, st
 }
 
 void RawCephConnector::Delete(const CephPath &path, std::error_code &ec) noexcept {
+	ec = std::error_code {};
 	auto ctx = RadosContext::Create(cluster, path.ns, ec);
 	if (ec) {
 		return;
 	}
-
-	if (auto ret = ctx->striper->remove(path.path); ret < 0) {
-		// Cannot delete through libradosstriper. Try force delete through librados.
-		ret = ctx->io_ctx->remove(path.path + CEPH_OBJ_SUFFIX);
-		if (ret < 0) {
-			ec = RadosErrorCategory::GetErrorCode(ret);
+	// use trunc to judge if the user has write permission
+	if (auto ret = ctx->striper->trunc(path, 0); ret < 0) {
+		switch (ret) {
+		case -ENOENT:
 			return;
+			break;
+		case -EBUSY:
+			BusyWaitBreakRetry(
+			    path, *ctx,
+			    [](const CephPath &path, const RadosContext &ctx) -> int { return ctx.striper->trunc(path.path, 0); },
+			    ec);
+			break;
+		default:
+			ec = RadosErrorCategory::GetErrorCode(-ret);
+			return;
+			break;
 		}
 	}
-	ec = std::error_code {};
+
+	if (auto ret = ctx->striper->remove(path.path); ret < 0) {
+		switch (ret) {
+		case -ENOENT:
+			break;
+		case -EBUSY:
+			BusyWaitBreakRetry(
+			    path, *ctx,
+			    [](const CephPath &path, const RadosContext &ctx) -> int { return ctx.striper->remove(path.path); },
+			    ec);
+			if (ec) {
+				ret = ctx->io_ctx->remove(path.path + CEPH_OBJ_SUFFIX);
+				if (ret < 0) {
+					ec = RadosErrorCategory::GetErrorCode(-ret);
+				}
+			}
+			break;
+		default:
+			ec = RadosErrorCategory::GetErrorCode(-ret);
+			break;
+		}
+	}
 }
 
 void RawCephConnector::RadosDelete(const CephPath &path, std::error_code &ec) noexcept {

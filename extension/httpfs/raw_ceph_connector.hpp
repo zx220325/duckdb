@@ -154,6 +154,8 @@ public:
 
 private:
 	struct RadosContext;
+	void BusyWaitBreakRetry(const CephPath &path, const RadosContext &ctx,
+	                      std::function<int(const CephPath &, const RadosContext &)> func, std::error_code &ec) noexcept;
 
 	librados::Rados cluster;
 };
