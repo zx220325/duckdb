@@ -50,8 +50,8 @@ constexpr std::chrono::minutes CACHE_VALID_DURATION {10};
 pid_t current_pid = getpid();
 
 struct FileMetaCache {
-	// to cache PARQUET footer and meta and very small files
-	constexpr static std::size_t READ_CACHE_LEN = 1 << 15;
+	// to cache PARQUET footer and meta and small files(<= 1MB)
+	constexpr static std::size_t READ_CACHE_LEN = 1 << 20;
 
 	typename std::chrono::system_clock::time_point cache_time;
 
@@ -317,7 +317,7 @@ private:
 
 class CephConnector::FileMetaManager {
 public:
-	explicit FileMetaManager(RawCephConnector &raw) noexcept : raw {raw}, enable_cache {true}, cache {1 << 15} {
+	explicit FileMetaManager(RawCephConnector &raw) noexcept : raw {raw}, enable_cache {true}, cache {1 << 12} {
 	}
 
 	template <typename FN>
