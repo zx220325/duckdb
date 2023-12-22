@@ -488,20 +488,6 @@ void RawCephConnector::Delete(const CephPath &path, std::error_code &ec) noexcep
 	if (ec) {
 		return;
 	}
-	// use trunc to judge if the user has write permission
-	if (auto ret = ctx->striper->trunc(path.path, 0); ret < 0) {
-		switch (ret) {
-		case -ENOENT:
-			return;
-			break;
-		case -EBUSY:
-			break;
-		default:
-			ec = RadosErrorCategory::GetErrorCode(-ret);
-			return;
-			break;
-		}
-	}
 
 	if (auto ret = ctx->striper->remove(path.path); ret < 0) {
 		switch (ret) {
