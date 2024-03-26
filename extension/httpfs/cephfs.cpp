@@ -154,25 +154,16 @@ int64_t CephFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes)
 	return nr_bytes;
 }
 
-void CephFileSystem::Write(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) {
-	throw NotImplementedException("Random write for ceph files not implemented");
-	/*
-	while (bytes_written < nr_bytes) {
-	    auto curr_location = location + bytes_written;
+void CephFileSystem::Append(FileHandle &handle, void *buffer, int64_t nr_bytes) {
+	auto &cs = CephConnector::GetSingleton();
+	auto &hfh = static_cast<CephFileHandle &>(handle);
 
-	    if (curr_location != hfh.file_offset) {
-	        throw InternalException("Non-sequential write not supported!");
-	    }
-
-	    auto bytes_to_write = nr_bytes - bytes_written;
-	    auto ret =
-	        cs.Write(hfh.obj_name, hfh.pool, hfh.ns, hfh.file_offset, (char *)buffer + bytes_written, bytes_to_write);
-	    D_ASSERT(ret == bytes_to_write);
-	    hfh.file_offset += bytes_to_write;
-	    bytes_written += bytes_to_write;
+	auto bytes_written = cs.Append(hfh.obj_name, hfh.pool, hfh.ns, reinterpret_cast<const char *>(buffer), nr_bytes);
+	if (bytes_written != nr_bytes) {
+		throw InternalException("Append operation failed to write all specified data");
 	}
-	return nr_bytes;
-	*/
+
+	hfh.file_offset += bytes_written;
 }
 
 int64_t CephFileSystem::Write(FileHandle &handle, void *buffer, int64_t nr_bytes) {

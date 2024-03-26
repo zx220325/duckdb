@@ -29,6 +29,9 @@ public:
 	std::int64_t Write(const std::string &path, const std::string &pool, const std::string &ns, const char *buffer_in,
 	                   std::size_t buffer_in_len);
 
+	std::int64_t Append(const std::string &path, const std::string &pool, const std::string &ns, const char *buffer_in,
+						std::size_t buffer_in_len);
+
 	bool Delete(const std::string &path, const std::string &pool, const std::string &ns);
 
 	std::vector<std::string> ListFiles(const std::string &pathprefix, const std::string &pool, const std::string &ns);

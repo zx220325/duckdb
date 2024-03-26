@@ -456,6 +456,23 @@ std::size_t RawCephConnector::Write(const CephPath &path, const void *buffer, st
 	return buffer_size;
 }
 
+std::size_t RawCephConnector::Append(const CephPath &path, const void *buffer, std::size_t buffer_size,
+									 std::error_code &ec) noexcept {
+	ec = std::error_code{};
+	auto ctx = RadosContext::Create(cluster, path.ns, ec);
+	if (ec) {
+		return 0;
+	}
+
+	auto bl = ceph::bufferlist::static_from_mem(const_cast<char *>(static_cast<const char *>(buffer)), buffer_size);
+	if (auto ret = ctx->striper->append(path.path, bl, buffer_size); ret < 0) {
+		ec = RadosErrorCategory::GetErrorCode(-ret);
+		return 0;
+	}
+
+	return buffer_size;
+}
+
 void RawCephConnector::Delete(const CephPath &path, std::error_code &ec) noexcept {
 	ec = std::error_code {};
 	auto ctx = RadosContext::Create(cluster, path.ns, ec);

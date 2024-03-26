@@ -549,6 +549,44 @@ int64_t CephConnector::Write(const std::string &path, const std::string &pool, c
 	return buffer_in_len;
 }
 
+int64_t CephConnector::Append(const std::string &path, const std::string &pool, const std::string &ns,
+                              const char *buffer_in, std::size_t buffer_in_len) {
+	CephPath key {{pool, ns}, path};
+
+	std::error_code ec;
+	raw->Append(key, buffer_in, buffer_in_len, ec);
+	if (ec) {
+		return -ec.value();
+	}
+
+	// Update file index and meta.
+	index_manager->InsertOrUpdate(key, ec);
+	if (ec) {
+		return -ec.value();
+	}
+
+	if (meta_manager->IsCacheEnabled()) {
+		meta_manager->GetFileMetaAndDo(
+		    key,
+		    [buffer_in_len](FileMetaCache &c, std::error_code &) {
+			    auto now = std::chrono::system_clock::now();
+			    c.cache_time = now;
+			    c.stat.size += buffer_in_len;
+			    c.stat.last_modified = now;
+
+			    // For now, just reset the read cache.
+				c.read_cache.reset();
+			    c.read_cache_start_offset = 0;
+		    },
+		    ec);
+		if (ec) {
+			return -ec.value();
+		}
+	}
+
+	return buffer_in_len;
+}
+
 bool CephConnector::Delete(const std::string &path, const std::string &pool, const std::string &ns) {
 	CephPath key {{pool, ns}, path};
 	std::error_code ec;

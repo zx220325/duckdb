@@ -119,6 +119,23 @@ TEST_F(CephConnectorTest, WriteAndReadLargeFile) {
 	ASSERT_EQ(cmp, 0);
 }
 
+TEST_F(CephConnectorTest, AppendAndRead) {
+	std::string oid = "/test.parquet";
+	std::string data = "data";
+
+	std::error_code ec;
+	auto ret = connector->Write(oid, TEST_NAMESPACE.pool, TEST_NAMESPACE.ns, data.c_str(), data.length());
+	ASSERT_EQ(ret, data.length());
+
+	ret = connector->Append(oid, TEST_NAMESPACE.pool, TEST_NAMESPACE.ns, data.c_str(), data.length());
+	ASSERT_EQ(ret, data.length());
+
+	std::string buffer(data.length() * 2, 0);
+	ret = connector->Read(oid, TEST_NAMESPACE.pool, TEST_NAMESPACE.ns, 0, buffer.data(), buffer.length());
+	ASSERT_EQ(ret, buffer.length());
+	ASSERT_EQ(buffer, "datadata");
+}
+
 TEST_F(CephConnectorTest, OverwriteAndRead) {
 	std::string oid = "/test.parquet";
 	std::string old_data = "old";

@@ -91,6 +91,8 @@ public:
 
 	std::size_t Write(const CephPath &path, const void *buffer, std::size_t buffer_size, std::error_code &ec) noexcept;
 
+	std::size_t Append(const CephPath &path, const void *buffer, std::size_t buffer_size, std::error_code &ec) noexcept;
+
 	void Delete(const CephPath &path, std::error_code &ec) noexcept;
 
 	void RadosDelete(const CephPath &path, std::error_code &ec) noexcept;
