@@ -52,37 +52,6 @@ public:
 constexpr const char *CEPH_CLUSTER_NAME = "ceph";
 constexpr std::size_t IO_SPLIT_SIZE = 1024 * 1024 * 1024;
 
-std::string GetEnv(const std::string &env) noexcept {
-	auto ptr = std::getenv(env.c_str());
-	std::string ret;
-	if (ptr) {
-		ret = std::string(ptr);
-	}
-	return ret;
-}
-
-std::string_view GetJdfsUsername() noexcept {
-	static std::string JDFS_USERNAME([] {
-		std::string username;
-		auto ceph_args = GetEnv("CEPH_ARGS");
-		if (!ceph_args.empty()) {
-			auto pos = ceph_args.find("client");
-			if (pos == std::string::npos) {
-				return username;
-			}
-			auto space = ceph_args.find(' ', pos);
-			username = ceph_args.substr(pos, space - pos);
-		} else {
-			username = GetEnv("SYS_JDFS_USERNAME");
-			if (username.empty()) {
-				username = GetEnv("JDFS_USERNAME");
-			}
-		}
-		return username;
-	}());
-	return JDFS_USERNAME;
-}
-
 std::size_t CombineHash(std::size_t h1, std::size_t h2) noexcept {
 	return h2 + 0x9e3779b9 + (h1 << 6) + (h1 >> 2);
 }

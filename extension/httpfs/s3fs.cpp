@@ -2,6 +2,7 @@
 
 #include "crypto.hpp"
 #include "duckdb.hpp"
+#include "utils.hpp"
 #ifndef DUCKDB_AMALGAMATION
 #include "duckdb/common/http_state.hpp"
 #include "duckdb/common/thread.hpp"
@@ -194,6 +195,11 @@ S3AuthParams S3AuthParams::ReadFrom(FileOpener *opener, FileOpenerInfo &info) {
 		if (tryGetEnv(AWSEnvironmentCredentialsProvider::SECRET_KEY_ENV_VAR, value)) {
 			secret_access_key = value;
 		}
+
+		if (access_key_id.empty() || secret_access_key.empty()) {
+			std::tie(access_key_id, secret_access_key) = GetCredetialsFromEnv();
+		}
+
 		if (tryGetEnv(AWSEnvironmentCredentialsProvider::SESSION_TOKEN_ENV_VAR, value)) {
 			session_token = value;
 		}
