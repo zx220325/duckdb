@@ -6,6 +6,7 @@
 #include "duckdb.hpp"
 #include "s3fs.hpp"
 
+
 namespace duckdb {
 
 static void LoadInternal(DatabaseInstance &instance) {
@@ -41,7 +42,7 @@ static void LoadInternal(DatabaseInstance &instance) {
 	config.AddExtensionOption("s3_endpoint", "S3 Endpoint (default 's3.amazonaws.com')", LogicalType::VARCHAR,
 	                          Value("s3.amazonaws.com"));
 	config.AddExtensionOption("s3_url_style", "S3 url style ('vhost' (default) or 'path')", LogicalType::VARCHAR,
-	                          Value("vhost"));
+	                          Value("path"));
 	config.AddExtensionOption("s3_use_ssl", "S3 use SSL (default true)", LogicalType::BOOLEAN, Value(true));
 	config.AddExtensionOption("s3_url_compatibility_mode", "Disable Globs and Query Parameters on S3 urls",
 	                          LogicalType::BOOLEAN, Value(false));
