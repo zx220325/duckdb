@@ -268,7 +268,13 @@ static std::string GetKeyRingFromCephConf(const std::string &ceph_conf) {
 std::tuple<std::string, std::string> GetCredetialsFromEnv() {
 	static std::tuple<std::string, std::string> CEPH_CREDENTIAL([] {
 		std::string username, password;
-		auto ceph_args = GetEnv("CEPH_ARGS");
+		auto ceph_args_name = "DATA_CORE_CEPH_ARGS";
+		auto ceph_args = GetEnv(ceph_args_name);
+		if (ceph_args.empty()) {
+			ceph_args_name = "CEPH_ARGS";
+			ceph_args = GetEnv(ceph_args_name);
+		}
+
 		if (!ceph_args.empty()) {
 			return GetCredentialsFromCephArgs(ceph_args);
 		}

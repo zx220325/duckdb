@@ -207,7 +207,8 @@ S3AuthParams S3AuthParams::ReadFrom(FileOpener *opener, FileOpenerInfo &info) {
 		if (tryGetEnv(AWSEnvironmentCredentialsProvider::DUCKDB_ENDPOINT_ENV_VAR, value)) {
 			endpoint = value;
 		} else {
-			endpoint = "s3.amazonaws.com";
+			throw std::runtime_error("Error: please set DATA_CORE_S3_ENDPOINT environment variable");
+			// endpoint = "s3.amazonaws.com";
 		}
 		if (tryGetEnv(AWSEnvironmentCredentialsProvider::DUCKDB_S3_URL_STYLE, value)) {
 			url_style = value;
@@ -245,7 +246,8 @@ S3AuthParams S3AuthParams::ReadFrom(FileOpener *opener, FileOpenerInfo &info) {
 		if (FileOpener::TryGetCurrentSetting(opener, "s3_endpoint", value)) {
 			endpoint = value.ToString();
 		} else {
-			endpoint = "s3.amazonaws.com";
+			throw std::runtime_error("Error: please set DATA_CORE_S3_ENDPOINT environment variable");
+			// endpoint = "s3.amazonaws.com";
 		}
 
 		if (FileOpener::TryGetCurrentSetting(opener, "s3_url_style", value)) {
