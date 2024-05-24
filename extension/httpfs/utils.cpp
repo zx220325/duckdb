@@ -177,7 +177,7 @@ static std::tuple<std::string, std::string> GetCredentialsFromCephArgs(std::stri
 	}
 
 	auto space = ceph_args.find(' ', pos);
-	username = ceph_args.substr(pos + 7, space - pos - 7);
+	username = ceph_args.substr(pos, space - pos);
 
 	pos = ceph_args.find("--key");
 	if (pos == std::string::npos) {
@@ -291,7 +291,6 @@ std::tuple<std::string, std::string> GetCredetialsFromEnv() {
 		if (username.find("client") == username.npos) {
 			throw std::runtime_error("JDFS_USERNAME should start with client prefix like client.xxx");
 		}
-		username = username.substr(7);
 
 		auto ceph_conf = GetEnv("SYS_JDFS_CONFIG_PATH");
 		if (ceph_conf.empty()) {
