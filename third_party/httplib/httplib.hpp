@@ -7576,7 +7576,7 @@ inline bool SSLClient::initialize_ssl(Socket &socket, Error &error) {
 				    return false;
 			    }
 
-			    auto server_cert = SSL_get_peer_certificate(ssl);
+			    auto server_cert = SSL_get1_peer_certificate(ssl);
 
 			    if (server_cert == nullptr) {
 				    error = Error::SSLServerVerification;

@@ -52,37 +52,6 @@ public:
 constexpr const char *CEPH_CLUSTER_NAME = "ceph";
 constexpr std::size_t IO_SPLIT_SIZE = 1024 * 1024 * 1024;
 
-std::string GetEnv(const std::string &env) noexcept {
-	auto ptr = std::getenv(env.c_str());
-	std::string ret;
-	if (ptr) {
-		ret = std::string(ptr);
-	}
-	return ret;
-}
-
-std::string_view GetJdfsUsername() noexcept {
-	static std::string JDFS_USERNAME([] {
-		std::string username;
-		auto ceph_args = GetEnv("CEPH_ARGS");
-		if (!ceph_args.empty()) {
-			auto pos = ceph_args.find("client");
-			if (pos == std::string::npos) {
-				return username;
-			}
-			auto space = ceph_args.find(' ', pos);
-			username = ceph_args.substr(pos, space - pos);
-		} else {
-			username = GetEnv("SYS_JDFS_USERNAME");
-			if (username.empty()) {
-				username = GetEnv("JDFS_USERNAME");
-			}
-		}
-		return username;
-	}());
-	return JDFS_USERNAME;
-}
-
 std::size_t CombineHash(std::size_t h1, std::size_t h2) noexcept {
 	return h2 + 0x9e3779b9 + (h1 << 6) + (h1 >> 2);
 }
@@ -250,12 +219,17 @@ void RawCephConnector::Connect() {
 		throw std::runtime_error("can not find JDFS_USERNAME in environment variable");
 	}
 
-	auto ceph_args = GetEnv("CEPH_ARGS");
+	auto ceph_args_name = "DATA_CORE_CEPH_ARGS";
+	auto ceph_args = GetEnv(ceph_args_name);
+	if (ceph_args.empty()) {
+		ceph_args_name = "CEPH_ARGS";
+		ceph_args = GetEnv(ceph_args_name);
+	}
 	if (!ceph_args.empty()) {
 		if (auto err = cluster.init2(GetJdfsUsername().data(), nullptr, 0); err < 0) {
 			throw std::runtime_error(std::string("Couldn't init cluster ") + std::strerror(-err));
 		}
-		if (auto err = cluster.conf_parse_env("CEPH_ARGS"); err < 0) {
+		if (auto err = cluster.conf_parse_env(ceph_args_name); err < 0) {
 			throw std::runtime_error(std::string("Couldn't parse config ") + std::strerror(-err));
 		}
 	} else {

@@ -2,6 +2,8 @@
 
 #include "crypto.hpp"
 #include "duckdb.hpp"
+#include "utils.hpp"
+
 #ifndef DUCKDB_AMALGAMATION
 #include "duckdb/common/http_state.hpp"
 #include "duckdb/common/thread.hpp"
@@ -194,24 +196,31 @@ S3AuthParams S3AuthParams::ReadFrom(FileOpener *opener, FileOpenerInfo &info) {
 		if (tryGetEnv(AWSEnvironmentCredentialsProvider::SECRET_KEY_ENV_VAR, value)) {
 			secret_access_key = value;
 		}
+
+		if (access_key_id.empty() || secret_access_key.empty()) {
+			std::tie(access_key_id, secret_access_key) = GetCredetialsFromEnv();
+		}
+
 		if (tryGetEnv(AWSEnvironmentCredentialsProvider::SESSION_TOKEN_ENV_VAR, value)) {
 			session_token = value;
 		}
 		if (tryGetEnv(AWSEnvironmentCredentialsProvider::DUCKDB_ENDPOINT_ENV_VAR, value)) {
 			endpoint = value;
 		} else {
-			endpoint = "s3.amazonaws.com";
+			throw std::runtime_error("Error: please set DATA_CORE_S3_ENDPOINT environment variable");
+			// endpoint = "s3.amazonaws.com";
 		}
 		if (tryGetEnv(AWSEnvironmentCredentialsProvider::DUCKDB_S3_URL_STYLE, value)) {
 			url_style = value;
 		} else {
 			url_style = endpoint == "s3.amazonaws.com" ? "vhost" : "path";
 		}
+
 		if (tryGetEnv(AWSEnvironmentCredentialsProvider::DUCKDB_USE_SSL_ENV_VAR, value) &&
-		    StringUtil::Lower(value) == "true") {
-			use_ssl = true;
-		} else {
+		    StringUtil::Lower(value) == "false") {
 			use_ssl = false;
+		} else {
+			use_ssl = true;
 		}
 	} else {
 		if (FileOpener::TryGetCurrentSetting(opener, "s3_region", value)) {
@@ -226,6 +235,10 @@ S3AuthParams S3AuthParams::ReadFrom(FileOpener *opener, FileOpenerInfo &info) {
 			secret_access_key = value.ToString();
 		}
 
+		if (access_key_id.empty() || secret_access_key.empty()) {
+			std::tie(access_key_id, secret_access_key) = GetCredetialsFromEnv();
+		}
+
 		if (FileOpener::TryGetCurrentSetting(opener, "s3_session_token", value)) {
 			session_token = value.ToString();
 		}
@@ -233,7 +246,8 @@ S3AuthParams S3AuthParams::ReadFrom(FileOpener *opener, FileOpenerInfo &info) {
 		if (FileOpener::TryGetCurrentSetting(opener, "s3_endpoint", value)) {
 			endpoint = value.ToString();
 		} else {
-			endpoint = "s3.amazonaws.com";
+			throw std::runtime_error("Error: please set DATA_CORE_S3_ENDPOINT environment variable");
+			// endpoint = "s3.amazonaws.com";
 		}
 
 		if (FileOpener::TryGetCurrentSetting(opener, "s3_url_style", value)) {
@@ -244,7 +258,7 @@ S3AuthParams S3AuthParams::ReadFrom(FileOpener *opener, FileOpenerInfo &info) {
 			}
 			url_style = val_str;
 		} else {
-			url_style = "vhost";
+			url_style = "path";
 		}
 
 		if (FileOpener::TryGetCurrentSetting(opener, "s3_use_ssl", value)) {

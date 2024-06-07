@@ -53,4 +53,11 @@ private:
 
 void ParseUrl(std::string_view url, std::string &pool_out, std::string &ns_out, std::string &path_out);
 
+
+std::string GetEnv(const std::string &env) noexcept;
+
+std::tuple<std::string, std::string> GetCredetialsFromEnv();
+
+std::string_view GetJdfsUsername() noexcept;
+
 } // namespace duckdb
