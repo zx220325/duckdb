@@ -150,7 +150,11 @@ std::string GetEnv(const std::string &env) noexcept {
 std::string_view GetJdfsUsername() noexcept {
 	static std::string JDFS_USERNAME([] {
 		std::string username;
-		auto ceph_args = GetEnv("CEPH_ARGS");
+		auto ceph_args = GetEnv("DATA_CORE_CEPH_ARGS");
+		if (ceph_args.empty()) {
+			ceph_args = GetEnv("CEPH_ARGS");
+		}
+
 		if (!ceph_args.empty()) {
 			auto pos = ceph_args.find("client");
 			if (pos == std::string::npos) {
