@@ -964,9 +964,9 @@ vector<string> S3FileSystem::Glob(const string &glob_pattern, FileOpener *opener
 	auto s3_auth_params = S3AuthParams::ReadFrom(opener, info);
 
 	// In url compatibility mode, we ignore globs allowing users to query files with the glob chars
-	if (s3_auth_params.s3_url_compatibility_mode) {
-		return {glob_pattern};
-	}
+	// if (s3_auth_params.s3_url_compatibility_mode) {
+	// 	return {glob_pattern};
+	// }
 
 	auto parsed_s3_url = S3UrlParse(glob_pattern, s3_auth_params);
 	auto parsed_glob_url = parsed_s3_url.trimmed_s3_url;
@@ -974,7 +974,9 @@ vector<string> S3FileSystem::Glob(const string &glob_pattern, FileOpener *opener
 	// AWS matches on prefix, not glob pattern, so we take a substring until the first wildcard char for the aws calls
 	auto first_wildcard_pos = parsed_glob_url.find_first_of("*[\\");
 	if (first_wildcard_pos == string::npos) {
-		return {glob_pattern};
+		if (FileExists(parsed_glob_url)) {
+			return {parsed_glob_url};
+		}
 	}
 
 	string shared_path = parsed_glob_url.substr(0, first_wildcard_pos);

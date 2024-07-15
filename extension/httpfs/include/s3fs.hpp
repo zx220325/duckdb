@@ -219,9 +219,7 @@ public:
 	BufferHandle Allocate(idx_t part_size, uint16_t max_threads);
 
 	//! S3 is object storage so directories effectively always exist
-	bool DirectoryExists(const string &directory) override {
-		return true;
-	}
+	// bool DirectoryExists(const string &directory) override;
 
 protected:
 	duckdb::unique_ptr<HTTPFileHandle> CreateHandle(const string &path, uint8_t flags, FileLockType lock,
