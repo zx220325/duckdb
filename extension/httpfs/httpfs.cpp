@@ -485,9 +485,6 @@ bool HTTPFileSystem::FileExists(const string &filename) {
 	try {
 		auto handle = OpenFile(filename.c_str(), FileFlags::FILE_FLAGS_READ);
 		auto &sfh = (HTTPFileHandle &)*handle;
-		if (sfh.length == 0) {
-			return false;
-		}
 		return true;
 	} catch (...) {
 		return false;
