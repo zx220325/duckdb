@@ -2,6 +2,7 @@
 
 #include "ceph_connector.hpp"
 #include "duckdb/common/atomic.hpp"
+#include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_opener.hpp"
 #include "duckdb/common/thread.hpp"
 #include "duckdb/common/types/hash.hpp"
@@ -15,6 +16,7 @@
 #include <ctime>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <string>
 #include <thread>
@@ -176,6 +178,15 @@ int64_t CephFileSystem::Write(FileHandle &handle, void *buffer, int64_t nr_bytes
 	}
 	auto &&cs = CephConnector::GetSingleton();
 	return cs.Write(hfh.obj_name, hfh.pool, hfh.ns, reinterpret_cast<const char *>(buffer), nr_bytes);
+}
+
+void CephFileSystem::Write(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) {
+	if (location == std::numeric_limits<idx_t>::max()) {
+		Append(handle, buffer, nr_bytes);
+		return;
+	}
+
+	throw NotImplementedException{"random write is not supported on ceph"};
 }
 
 void CephFileSystem::FileSync(FileHandle &handle) {
