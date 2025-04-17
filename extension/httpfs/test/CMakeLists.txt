@@ -1,13 +1,5 @@
-include(FetchContent)
-FetchContent_Declare(
-  googletest
-  URL https://github.com/google/googletest/archive/03597a01ee50ed33e9dfd640b249b4be3799d395.zip
-)
-FetchContent_Declare(
-  benchmark
-  URL https://github.com/google/benchmark/archive/refs/tags/v1.8.3.zip
-)
-FetchContent_MakeAvailable(googletest benchmark)
+find_package(GTest REQUIRED)
+find_package(benchmark REQUIRED)
 
 add_executable(ceph_test ceph.cpp path.cpp)
 target_link_libraries(ceph_test httpfs_extension GTest::gtest_main)
