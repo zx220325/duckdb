@@ -123,9 +123,9 @@ option(ENABLE_EXTENSION_AUTOLOADING "Enable extension auto-loading by default." 
 option(ENABLE_EXTENSION_AUTOINSTAll "Enable extension auto-installing by default." FALSE)
 option(EXTENSION_TESTS_ONLY "Only load the tests for extensions, don't actually build them; useful for testing loadable extensions" FALSE)
 option(WASM_LOADABLE_EXTENSIONS "WebAssembly build with loadable extensions." FALSE)
-option(ENABLE_SANITIZER "Enable address sanitizer." TRUE)
+option(ENABLE_SANITIZER "Enable address sanitizer." FALSE)
 option(ENABLE_THREAD_SANITIZER "Enable thread sanitizer." FALSE)
-option(ENABLE_UBSAN "Enable undefined behavior sanitizer." TRUE)
+option(ENABLE_UBSAN "Enable undefined behavior sanitizer." FALSE)
 option(DISABLE_VPTR_SANITIZER "Disable vptr sanitizer; work-around for sanitizer false positive on Macbook M1" FALSE)
 option(
   FORCE_SANITIZER
@@ -239,54 +239,12 @@ if(${CMAKE_SYSTEM_NAME} STREQUAL "SunOS")
   set(SUN TRUE)
 endif()
 
-find_package(Git)
-if(Git_FOUND)
-  if (NOT DEFINED GIT_COMMIT_HASH)
-    execute_process(
-            COMMAND ${GIT_EXECUTABLE} log -1 --format=%h
-            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-            RESULT_VARIABLE GIT_RESULT
-            OUTPUT_VARIABLE GIT_COMMIT_HASH
-            OUTPUT_STRIP_TRAILING_WHITESPACE)
-  endif()
-  execute_process(
-          COMMAND ${GIT_EXECUTABLE} describe --tags --abbrev=0
-          WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-          OUTPUT_VARIABLE GIT_LAST_TAG
-          OUTPUT_STRIP_TRAILING_WHITESPACE)
-  execute_process(
-          COMMAND ${GIT_EXECUTABLE} describe --tags --long
-          WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-          OUTPUT_VARIABLE GIT_ITERATION
-          OUTPUT_STRIP_TRAILING_WHITESPACE)
-else()
-  message("Git NOT FOUND")
-endif()
-
-if(GIT_RESULT EQUAL "0")
-  string(REGEX REPLACE "v([0-9]+).[0-9]+.[0-9]+" "\\1" DUCKDB_MAJOR_VERSION "${GIT_LAST_TAG}")
-  string(REGEX REPLACE "v[0-9]+.([0-9]+).[0-9]+" "\\1" DUCKDB_MINOR_VERSION "${GIT_LAST_TAG}")
-  string(REGEX REPLACE "v[0-9]+.[0-9]+.([0-9]+)" "\\1" DUCKDB_PATCH_VERSION "${GIT_LAST_TAG}")
-  string(REGEX REPLACE ".*-([0-9]+)-.*" "\\1" DUCKDB_DEV_ITERATION "${GIT_ITERATION}")
-
-  if(DUCKDB_DEV_ITERATION EQUAL 0)
-    # on a tag; directly use the version
-    set(DUCKDB_VERSION "${GIT_LAST_TAG}")
-  else()
-    # not on a tag, increment the patch version by one and add a -devX suffix
-    math(EXPR DUCKDB_PATCH_VERSION "${DUCKDB_PATCH_VERSION}+1")
-    set(DUCKDB_VERSION "v${DUCKDB_MAJOR_VERSION}.${DUCKDB_MINOR_VERSION}.${DUCKDB_PATCH_VERSION}-dev${DUCKDB_DEV_ITERATION}")
-  endif()
-else()
-  # fallback for when building from tarball
-  set(DUCKDB_MAJOR_VERSION 0)
-  set(DUCKDB_MINOR_VERSION 0)
-  set(DUCKDB_PATCH_VERSION 1)
-  set(DUCKDB_DEV_ITERATION 0)
-  set(DUCKDB_VERSION "v${DUCKDB_MAJOR_VERSION}.${DUCKDB_MINOR_VERSION}.${DUCKDB_PATCH_VERSION}-dev${DUCKDB_DEV_ITERATION}")
-endif()
-
-message(STATUS "git hash ${GIT_COMMIT_HASH}, version ${DUCKDB_VERSION}")
+set(DUCKDB_MAJOR_VERSION 0)
+set(DUCKDB_MINOR_VERSION 0)
+set(DUCKDB_PATCH_VERSION 1)
+set(DUCKDB_DEV_ITERATION 0)
+set(DUCKDB_VERSION "v${DUCKDB_MAJOR_VERSION}.${DUCKDB_MINOR_VERSION}.${DUCKDB_PATCH_VERSION}-dev${DUCKDB_DEV_ITERATION}")
+message(STATUS "version ${DUCKDB_VERSION}")
 
 option(AMALGAMATION_BUILD
        "Build from the amalgamation files, rather than from the normal sources."
