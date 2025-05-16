@@ -41,6 +41,35 @@ else()
   endif()
 endif()
 
+set(duckdb_all_namespaces
+  duckdb
+  duckdb_adbc
+  duckdb_apache
+  duckdb_fast_float
+  duckdb_fastpforlib
+  duckdb_fmt
+  duckdb_hll
+  duckdb_httplib
+  duckdb_httplib_openssl
+  duckdb_jaro_winkler
+  duckdb_jemalloc
+  duckdb_libpgquery
+  duckdb_mbedtls
+  duckdb_miniz
+  duckdb_moodycamel
+  duckdb_nanoarrow
+  duckdb_parquet
+  duckdb_pdqsort
+  duckdb_re2
+  duckdb_skiplistlib
+  duckdb_snappy
+  duckdb_tdigest
+  duckdb_zstd
+)
+foreach (namespace IN LISTS duckdb_all_namespaces)
+  add_compile_definitions(${namespace}=${namespace}_old)
+endforeach ()
+
 # Determine install paths
 set(INSTALL_LIB_DIR
     lib
@@ -89,8 +118,6 @@ if(${FORCE_COLORED_OUTPUT})
     add_compile_options(-fcolor-diagnostics)
   endif()
 endif()
-
-option("Enable address sanitizer." TRUE)
 
 set(M32_FLAG "")
 if(FORCE_32_BIT)
@@ -452,6 +479,10 @@ include_directories(third_party/pcg)
 include_directories(third_party/tdigest)
 include_directories(third_party/mbedtls/include)
 include_directories(third_party/jaro_winkler)
+
+function (add_old_duckdb_library name)
+  add_library(${name}_old ${ARGN})
+endfunction ()
 
 # todo only regenerate ub file if one of the input files changed hack alert
 function(enable_unity_build UB_SUFFIX SOURCE_VARIABLE_NAME)
