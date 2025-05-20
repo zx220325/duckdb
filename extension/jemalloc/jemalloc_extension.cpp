@@ -75,6 +75,9 @@ void JemallocExtension::ThreadFlush(idx_t threshold) {
 
 extern "C" {
 
+DUCKDB_EXTENSION_API void jemalloc_init(duckdb::DatabaseInstance &db) asm("jemalloc_init_old");
+DUCKDB_EXTENSION_API const char *jemalloc_version() asm("jemalloc_version_old");
+
 DUCKDB_EXTENSION_API void jemalloc_init(duckdb::DatabaseInstance &db) {
 	duckdb::DuckDB db_wrapper(db);
 	db_wrapper.LoadExtension<duckdb::JemallocExtension>();

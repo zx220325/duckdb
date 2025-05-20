@@ -65,8 +65,8 @@ bool pg_tz_acceptable(pg_tz *tz);
 
 /* these functions and variables are in pgtz.c */
 
-pg_tz *session_timezone;
-pg_tz *log_timezone;
+pg_tz *session_timezone asm("session_timezone_old");
+pg_tz *log_timezone asm("log_timezone_old");
 
 void pg_timezone_initialize(void);
 pg_tz *pg_tzset(const char *tzname);
